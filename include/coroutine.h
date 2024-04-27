@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <ranges>
 #include <cassert>
+#include "config.h"
 #include "utils.h"
 
 struct Task {
@@ -146,7 +147,9 @@ public:
         // TODO: SQPOLL.
         if((_inflight += io_uring_submit(&uring)) == 0) {
             hang();
-            return;
+            if constexpr (!uring_features::use_multishot) {
+                return;
+            }
         }
 
         // Some cqes are in-flight,
@@ -166,6 +169,7 @@ public:
         }
         done ? io_uring_cq_advance(&uring, done) : hang();
 
+        uring_features::multishot_workaround_inflight(_inflight, done);
         assert(_inflight >= done);
         _inflight -= done;
     }

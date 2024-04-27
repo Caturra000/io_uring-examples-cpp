@@ -3,7 +3,8 @@
 INCLUDE = include
 EXAMPLES = examples
 BUILD = build
-ALL_TARGET_NAME = cat echo echo_coroutine multi_task_test feature_multishot
+ALL_TARGET_NAME = cat echo echo_coroutine multi_task_test \
+	feature_multishot feature_multishot2
 
 all: $(ALL_TARGET_NAME)
 
