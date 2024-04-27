@@ -18,8 +18,8 @@ struct Task {
     ~Task() { if(_handle && !_co_awaited) _handle.destroy(); }
     auto detach() noexcept { return std::exchange(_handle, {}); }
     // Move ctor only.
+    Task(Task &&rhs) noexcept: _handle(rhs.detach()), _co_awaited(rhs._co_awaited /*safe*/) {}
     Task(const Task&) = delete;
-    Task(Task &&rhs): _handle(rhs.detach()), _co_awaited(rhs._co_awaited /*safe*/) {}
     Task& operator=(const Task&) = delete;
     Task& operator=(Task&&) = delete;
     auto operator co_await() && noexcept;
@@ -86,8 +86,6 @@ struct Async_user_data {
     std::coroutine_handle<> h;
 };
 
-// Currently `Result` is unused.
-template <typename Result>
 struct Async_operation {
     constexpr bool await_ready() const noexcept {
         if(!user_data.sqe) [[unlikely]] {
@@ -95,33 +93,32 @@ struct Async_operation {
         }
         return false;
     }
-    void await_suspend(std::coroutine_handle<> h) {
+    void await_suspend(std::coroutine_handle<> h) noexcept {
         user_data.h = h;
         io_uring_sqe_set_data(user_data.sqe, &user_data);
         // Eager? Lazy? SQPOLL?
         // io_uring_submit(user_data.uring);
     }
-    // TODO: Don't return cqe->res directly.
     auto await_resume() const noexcept {
         if(!user_data.sqe) [[unlikely]] {
             return -ENOMEM;
         }
         return user_data.cqe->res;
     }
-    Async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) {
+    Async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) noexcept {
         user_data.uring = uring;
         // If !sqe, return -ENOMEM immediately. (await_ready() => true.)
         if((user_data.sqe = io_uring_get_sqe(uring))) [[likely]] {
             uring_prep_fn(user_data.sqe, std::forward<decltype(args)>(args)...);
         }
     }
+    Async_operation() = default;
 
     Async_user_data user_data;
 };
 
-inline auto async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) {
-    using Result = std::invoke_result_t<decltype(uring_prep_fn), io_uring_sqe*, decltype(args)...>;
-    return Async_operation<Result>(uring, uring_prep_fn, std::forward<decltype(args)>(args)...);
+inline auto async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) noexcept {
+    return Async_operation(uring, uring_prep_fn, std::forward<decltype(args)>(args)...);
 }
 
 // A quite simple io_context.
@@ -136,11 +133,12 @@ public:
     // Once = submit + reap.
     template <bool Exactly_once = false>
     void run_once() {
-        auto loop_count = Exactly_once ? runtime_once() : runtime_plug();
-        for(auto _ : std::views::iota(0, loop_count)) {
-            auto h = _operations.front();
+        auto some = Exactly_once ? take_once() : take_batch();
+        namespace views = std::ranges::views;
+        for(auto _ : views::iota(0) | views::take(some)) {
+            auto op = _operations.front();
             _operations.pop();
-            h.resume();
+            op.resume();
             // Unused.
             [](...){}(_);
         }
@@ -207,12 +205,12 @@ private:
         }
     }
 
-    int runtime_plug() const {
-        constexpr size_t /*same type*/ PLUG_MAX = 32;
-        return std::min(PLUG_MAX, _operations.size());
+    size_t take_batch() const {
+        constexpr size_t /*same type*/ BATCH_MAX = 32;
+        return std::min(BATCH_MAX, _operations.size());
     }
 
-    int runtime_once() const {
+    size_t take_once() const {
         return !_operations.empty();
     }
 
