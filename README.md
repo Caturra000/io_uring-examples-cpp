@@ -54,6 +54,7 @@ int main() {
 2. `echo.cpp`：使用回调的echo程序。
 3. `echo_coroutine.cpp`：使用协程的echo程序。
 4. `multi_task_test.cpp`：`co_await Task`测试。
+5. `feature_multishot.cpp`：使用multishot特性的监听服务器。
 
 构建使用`make all`命令，可执行文件会生成于`build`目录。
 
