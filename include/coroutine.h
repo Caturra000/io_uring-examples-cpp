@@ -14,22 +14,18 @@
 
 struct Task {
     struct promise_type;
-    Task() = default;
     constexpr Task(std::coroutine_handle<promise_type> handle) noexcept: _handle(handle) {}
-    // Task is not intended to be a lvalue and handle/promise is already allocated whenenver used.
-    // But in the default dtor, we cannot handle this case, so it results in a memory leak.
-    // NOTE: co_await operator is not allowed to aceept lvalue Task, so why are you doing this?
-    ~Task() = default;
-    // No move/copy.
+    ~Task() { if(_handle && !_co_awaited) _handle.destroy(); }
+    auto detach() noexcept { return std::exchange(_handle, {}); }
+    // Move ctor only.
     Task(const Task&) = delete;
-    Task(Task&&) = delete;
+    Task(Task &&rhs): _handle(rhs.detach()), _co_awaited(rhs._co_awaited /*safe*/) {}
     Task& operator=(const Task&) = delete;
     Task& operator=(Task&&) = delete;
-    auto detach() { return std::exchange(_handle, {}); }
-
-    friend auto operator co_await(Task) noexcept;
+    auto operator co_await() && noexcept;
 private:
     std::coroutine_handle<promise_type> _handle;
+    bool _co_awaited {false};
 };
 
 struct Task::promise_type {
@@ -42,36 +38,36 @@ struct Task::promise_type {
     }
     struct Final_suspend {
         constexpr bool await_ready() const noexcept { return false; }
-        auto await_suspend(auto h) const noexcept {
-            auto next = h.promise()._parent;
+        auto await_suspend(auto callee) const noexcept {
+            auto caller = callee.promise()._caller;
             // Started task (at least once) will kill itself in final_suspend.
-            h.destroy();
-            return next;
+            callee.destroy();
+            return caller;
         }
         // Never reached.
         constexpr auto await_resume() const noexcept {}
     };
     constexpr auto final_suspend() const noexcept { return Final_suspend{}; }
-    void push(std::coroutine_handle<> parent) noexcept { _parent = parent; }
+    void push(std::coroutine_handle<> caller) noexcept { _caller = caller; }
 
-    std::coroutine_handle<> _parent {std::noop_coroutine()};
+    std::coroutine_handle<> _caller {std::noop_coroutine()};
 };
 
-// Multi-task support.
-// NOTE: Tasks are unmovale and uncopyable.
+// Multi-task support (rvalue only).
 // Examples:
 //   GOOD:
 //     co_await make_task(...);
+//     ////////////////////////////
+//     Task task = make_task(...);
+//     co_await std::move(task);
 //   BAD:
 //     Task task = make_task(...); // Compilable but meaningless.
-//     co_await task;
-//     // or
-//     co_await std::move(task);
-inline auto operator co_await(Task task) noexcept {
+//     co_await task;              // Error. Rejected by compiler.
+inline auto Task::operator co_await() && noexcept {
     struct awaiter {
         bool await_ready() const noexcept { return !_handle || _handle.done(); }
-        auto await_suspend(std::coroutine_handle<> current) noexcept {
-            _handle.promise().push(current);
+        auto await_suspend(std::coroutine_handle<> caller) noexcept {
+            _handle.promise().push(caller);
             // Multi-tasks are considered as a single operation in io_contexts.
             return _handle;
         }
@@ -79,7 +75,8 @@ inline auto operator co_await(Task task) noexcept {
 
         std::coroutine_handle<Task::promise_type> _handle;
     };
-    return awaiter{task._handle};
+    _co_awaited = true;
+    return awaiter{_handle};
 }
 
 struct Async_user_data {
