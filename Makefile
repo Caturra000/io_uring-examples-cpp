@@ -13,4 +13,4 @@ clean:
 
 %: $(EXAMPLES)/%.cpp
 	@mkdir -p $(BUILD)
-	$(CXX) -std=c++20 -Wall -Wextra -g -I$(INCLUDE) $^ -luring -o $(BUILD)/$@
+	-$(CXX) -std=c++20 -Wall -Wextra -g -I$(INCLUDE) $^ -luring -o $(BUILD)/$@
