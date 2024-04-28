@@ -97,8 +97,7 @@ struct Async_operation {
     void await_suspend(std::coroutine_handle<> h) noexcept {
         user_data.h = h;
         io_uring_sqe_set_data(user_data.sqe, &user_data);
-        // Eager? Lazy? SQPOLL?
-        // io_uring_submit(user_data.uring);
+        // May submit here. (Eager mode)
     }
     auto await_resume() const noexcept {
         if(!user_data.sqe) [[unlikely]] {
@@ -144,10 +143,9 @@ public:
             [](...){}(_);
         }
 
-        // TODO: SQPOLL.
         if((_inflight += io_uring_submit(&uring)) == 0) {
-            hang();
-            if constexpr (!uring_features::use_multishot) {
+            if constexpr (!uring_features::inflight_conflict) {
+                hang();
                 return;
             }
         }
@@ -169,7 +167,7 @@ public:
         }
         done ? io_uring_cq_advance(&uring, done) : hang();
 
-        uring_features::multishot_workaround_inflight(_inflight, done);
+        uring_features::inflight_conflict_workaround(_inflight, done);
         assert(_inflight >= done);
         _inflight -= done;
     }
