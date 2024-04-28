@@ -1,12 +1,16 @@
-# io_uring示例
+#include <unistd.h>
+#include <netinet/in.h>
+#include <liburing.h>
+#include <utility>
+#include <iostream>
+#include <algorithm>
+#include <array>
+#include <ranges>
+#include <iterator>
+#include "utils.h"
+#include "coroutine.h"
+#include "feature_io_drain.h"
 
-本仓库提供简单的`io_uring` / `liburing`使用示例，包括同步用法和C++20协程的异步用法。
-
-其中协程封装在`include/coroutine.h`，仅需200行代码。
-
-以下是一个类似Asio C++20协程的echo程序：
-
-```cpp
 Task echo(io_uring *uring, int client_fd) {
     char buf[4096];
     for(;;) {
@@ -26,9 +30,12 @@ Task echo(io_uring *uring, int client_fd) {
     }
 }
 
+// This server will accept connections from all clients,
+// but will only respond to ONE client at a time. 
+// Other clients will be blocked until the first client closes its connection.
 Task server(io_uring *uring, Io_context &io_context, int server_fd) {
     for(;;) {
-        auto client_fd = co_await async_accept(uring, server_fd) | nofail("accept");
+        auto client_fd = co_await async_drain_accept(uring, server_fd) | nofail("accept");
         // Fork a new connection.
         co_spawn(io_context, echo(uring, client_fd));
     }
@@ -47,20 +54,3 @@ int main() {
     co_spawn(io_context, server(&uring, io_context, server_fd));
     io_context.run();
 }
-```
-
-其它示例请看`examples`目录：
-1. `cat.cpp`：类似`cat`命令。
-2. `echo.cpp`：使用回调的echo程序。
-3. `echo_coroutine.cpp`：使用协程的echo程序。
-4. `multi_task_test.cpp`：`co_await Task`测试。
-5. `feature_multishot.cpp`：使用multishot特性的监听服务器。
-6. `feature_multishot2.cpp`：使用multishot与协程的echo程序。
-7. `feature_sqpoll.cpp`：使用SQPOLL特性的echo程序，更多细节见`feature_sqpoll.h`文件。
-8. `feature_io_drain.cpp`：使用IO drain特性的echo程序。
-
-构建使用`make all`命令，可执行文件会生成于`build`目录。
-
-NOTE: 请确保编译器支持C++20标准，以及系统已安装`liburing`。  
-TODO: 高级特性待补充。  
-FIXME: 考虑到内核提供主动poll的特性，`awaiter`的构造与`await_suspend`需要调整。

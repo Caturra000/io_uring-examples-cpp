@@ -4,7 +4,8 @@ INCLUDE = include
 EXAMPLES = examples
 BUILD = build
 ALL_TARGET_NAME = cat echo echo_coroutine multi_task_test \
-	feature_multishot feature_multishot2 feature_sqpoll
+	feature_multishot feature_multishot2 feature_sqpoll   \
+	feature_io_drain
 
 all: $(ALL_TARGET_NAME)
 
