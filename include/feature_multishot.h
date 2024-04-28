@@ -5,15 +5,22 @@
 struct Async_multishot_operation: private Async_operation {
     using Base = Async_operation;
     using Base::Base;
-    using Base::await_ready;
     using Base::await_suspend;
+
+    constexpr bool await_ready() const noexcept {
+        if(user_data.no_resume && user_data.cqe) {
+            return true;
+        }
+        return Base::await_ready();
+    }
 
     auto await_resume() noexcept {
         auto res = Base::await_resume();
-        auto cqe = user_data.cqe;
+        auto &cqe = user_data.cqe;
         if(!cqe || !(cqe->flags & IORING_CQE_F_MORE)) [[unlikely]] {
             user_data.uring = nullptr;
         }
+        cqe = nullptr;
         return res;
     }
 
