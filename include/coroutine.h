@@ -161,6 +161,8 @@ public:
         // NOTE: One operation can also generate multiple cqes (awaiters).
         io_uring_for_each_cqe(&uring, head, cqe) {
             done++;
+            // For io_uring_prep_cancel().
+            if(cqe->res == -ECANCELED) [[unlikely]] continue;
             auto user_data = std::bit_cast<Async_user_data*>(cqe->user_data);
             user_data->cqe = cqe;
             user_data->h.resume();
