@@ -44,10 +44,14 @@ struct Async_multishot_operation: private Async_operation {
         if(!user_data.uring) return;
 
         auto sqe = io_uring_get_sqe(user_data.uring);
-        // FIXME: reserved sqe.
-        if(!sqe) return;
+        // Best-effort retrieve.
+        if(!sqe) [[unlikely]] {
+            io_uring_submit(user_data.uring);
+            sqe = io_uring_get_sqe(user_data.uring);
+            if(!sqe) return;
+        }
 
-        // No resume in io_context.
+        // No resume in io_contexts.
         sqe->flags |= IOSQE_CQE_SKIP_SUCCESS;
         // The first request matching the `user_data` will be canceled.
         // NOTE: user_data will be invalid after dtor, but liburing just compares its address.
