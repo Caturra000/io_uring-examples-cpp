@@ -82,22 +82,27 @@ inline auto Task::operator co_await() && noexcept {
 
 struct Async_user_data {
     io_uring *uring;
-    io_uring_sqe *sqe;
-    io_uring_cqe *cqe;
-    std::coroutine_handle<> h;
+    io_uring_sqe *sqe {};
+    io_uring_cqe *cqe {};
+    // io_contexts may submit before setting up `h` in await_suspend().
+    // Therefore:
+    // 1. Operations need a check in await_ready().
+    // 2. `h` should be initially `std::noop-`, which is safe (and no effect) to resume.
+    std::coroutine_handle<> h {std::noop_coroutine()};
+
+    Async_user_data(io_uring *uring) noexcept: uring(uring) {}
 };
 
 struct Async_operation {
     constexpr bool await_ready() const noexcept {
-        if(!user_data.sqe) [[unlikely]] {
-            return true;
+        // No allocation error and no eager completion.
+        if(user_data.sqe && !user_data.cqe) [[likely]] {
+            return false;
         }
-        return false;
+        return true;
     }
     void await_suspend(std::coroutine_handle<> h) noexcept {
         user_data.h = h;
-        io_uring_sqe_set_data(user_data.sqe, &user_data);
-        // May submit here. (Eager mode)
     }
     auto await_resume() const noexcept {
         if(!user_data.sqe) [[unlikely]] {
@@ -105,14 +110,14 @@ struct Async_operation {
         }
         return user_data.cqe->res;
     }
-    Async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) noexcept {
-        user_data.uring = uring;
+    Async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) noexcept: user_data(uring) {
         // If !sqe, return -ENOMEM immediately. (await_ready() => true.)
         if((user_data.sqe = io_uring_get_sqe(uring))) [[likely]] {
+            io_uring_sqe_set_data(user_data.sqe, &user_data);
+            // In the FAST_POLL feature, IO requests may be completed (internally) there.
             uring_prep_fn(user_data.sqe, std::forward<decltype(args)>(args)...);
         }
     }
-    Async_operation() = default;
 
     Async_user_data user_data;
 };
