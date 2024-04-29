@@ -85,7 +85,6 @@ struct Async_user_data {
     io_uring_sqe *sqe;
     io_uring_cqe *cqe;
     std::coroutine_handle<> h;
-    bool no_resume {false};
 };
 
 struct Async_operation {
@@ -164,9 +163,7 @@ public:
             done++;
             auto user_data = std::bit_cast<Async_user_data*>(cqe->user_data);
             user_data->cqe = cqe;
-            if(!user_data->no_resume) {
-                user_data->h.resume();
-            }
+            user_data->h.resume();
         }
         done ? io_uring_cq_advance(&uring, done) : hang();
 
