@@ -24,10 +24,11 @@ struct Async_multishot_operation: private Async_operation {
 
     auto await_resume() noexcept {
         auto res = Base::await_resume();
-        auto cqe = user_data.cqe;
+        auto &cqe = user_data.cqe;
         if(!cqe || !(cqe->flags & IORING_CQE_F_MORE)) [[unlikely]] {
             user_data.uring = nullptr;
         }
+        cqe = nullptr;
         return res;
     }
 
