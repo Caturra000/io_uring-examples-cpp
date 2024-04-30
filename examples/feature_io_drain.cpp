@@ -31,8 +31,8 @@ Task echo(io_uring *uring, int client_fd) {
 }
 
 // This server will accept connections from all clients,
-// but will only respond to ONE client at a time. 
-// Other clients will be blocked until the first client closes its connection.
+// but will first respond to each previous client at least once
+// before responding to new ones.
 Task server(io_uring *uring, Io_context &io_context, int server_fd) {
     for(;;) {
         auto client_fd = co_await async_drain_accept(uring, server_fd) | nofail("accept");
