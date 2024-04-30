@@ -58,6 +58,7 @@ int main() {
 6. `feature_multishot2.cpp`：使用multishot与协程的echo程序。
 7. `feature_sqpoll.cpp`：使用SQPOLL特性的echo程序，更多细节见`feature_sqpoll.h`文件。
 8. `feature_io_drain.cpp`：使用IO drain特性的echo程序。
+9. `feature_io_link.cpp`：使用IO link特性的单向回复程序。
 
 构建使用`make all`命令，可执行文件会生成于`build`目录。
 
