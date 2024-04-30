@@ -11,22 +11,20 @@
 #include <ranges>
 #include <cassert>
 #include "config.h"
-#include "utils.h"
 
 struct Task {
     struct promise_type;
     constexpr Task(std::coroutine_handle<promise_type> handle) noexcept: _handle(handle) {}
-    ~Task() { if(_handle && !_co_awaited) _handle.destroy(); }
+    ~Task() { if(_handle) _handle.destroy(); }
     auto detach() noexcept { return std::exchange(_handle, {}); }
     // Move ctor only.
-    Task(Task &&rhs) noexcept: _handle(rhs.detach()), _co_awaited(rhs._co_awaited /*safe*/) {}
+    Task(Task &&rhs) noexcept: _handle(rhs.detach()) {}
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     Task& operator=(Task&&) = delete;
     auto operator co_await() && noexcept;
 private:
     std::coroutine_handle<promise_type> _handle;
-    bool _co_awaited {false};
 };
 
 struct Task::promise_type {
@@ -76,8 +74,7 @@ inline auto Task::operator co_await() && noexcept {
 
         std::coroutine_handle<Task::promise_type> _handle;
     };
-    _co_awaited = true;
-    return awaiter{_handle};
+    return awaiter{detach()};
 }
 
 struct Async_user_data {
