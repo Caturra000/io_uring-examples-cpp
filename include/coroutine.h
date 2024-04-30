@@ -110,9 +110,15 @@ struct Async_operation {
     Async_operation(io_uring *uring, auto uring_prep_fn, auto &&...args) noexcept: user_data(uring) {
         // If !sqe, return -ENOMEM immediately. (await_ready() => true.)
         if((user_data.sqe = io_uring_get_sqe(uring))) [[likely]] {
-            io_uring_sqe_set_data(user_data.sqe, &user_data);
-            // In the FAST_POLL feature, IO requests may be completed (internally) there.
             uring_prep_fn(user_data.sqe, std::forward<decltype(args)>(args)...);
+            // https://man7.org/linux/man-pages/man3/io_uring_cqe_get_data.3.html
+            // For Linux v5.15, data must be set AFTER prep_fn();
+            // otherwise, io_uring will return an inaccessible CQE.
+            // This problem does not exist in Linux v6.1.
+            // However, according to the man page,
+            // set_data() only needs to be called before submit().
+            // Fine, it just works...
+            io_uring_sqe_set_data(user_data.sqe, &user_data);
         }
     }
 
