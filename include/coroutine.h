@@ -11,6 +11,7 @@
 #include <ranges>
 #include <cassert>
 #include "config.h"
+#include "utils.h"
 
 struct Task {
     struct promise_type;
@@ -141,6 +142,7 @@ public:
     // Once = submit + reap.
     template <bool Exactly_once = false>
     void run_once() {
+        run_once_prepare();
         auto some = Exactly_once ? take_once() : take_batch();
         namespace views = std::ranges::views;
         for(auto _ : views::iota(0) | views::take(some)) {
@@ -206,6 +208,8 @@ public:
         io_context._operations.emplace(task.detach());
     }
 
+    bool push_to_switch(std::coroutine_handle<> h) noexcept { return _switch_fifo.push(h); }
+
 private:
     void hang() {
         // TODO: config option, event driven.
@@ -226,10 +230,18 @@ private:
         return !_operations.empty();
     }
 
+    void run_once_prepare() noexcept {
+        // Pull one coroutine to this running context.
+        std::coroutine_handle<> h {};
+        _switch_fifo.pop(h);
+        if(h) _operations.emplace(h);
+    }
+
     io_uring &uring;
     std::queue<std::coroutine_handle<>> _operations;
     size_t _inflight {};
     bool _stop {false};
+    Fifo<std::coroutine_handle<>, 64> _switch_fifo;
     // TODO: work_guard;
 };
 

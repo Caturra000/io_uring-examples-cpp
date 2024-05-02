@@ -8,6 +8,8 @@
 #include <string_view>
 #include <type_traits>
 #include <bit>
+#include <array>
+#include <atomic>
 
 // C-style check for syscall.
 inline void check(int cond, const char *reason) {
@@ -72,3 +74,48 @@ inline int make_server(int port) {
 
     return socket_fd;
 }
+
+// A lock-free, single-producer-single-consumer and fixed-size FIFO implementation.
+// (Mostly copied from linux/kfifo.)
+// That is:
+// Only one thread may call push().
+// Only one thread may call pop().
+//
+// NOTE:
+// For multiple writer and one reader there is only a need to lock the writer.
+// For only one writer and multiple reader there is only a need to lock the reader.
+//
+// T: type of elements.
+// SIZE: size of the allocated buffer. MUST be a power of 2.
+template <typename /*TODO: concept*/ T, size_t SIZE>
+struct Fifo {
+    std::array<T, SIZE> _buffer;
+    alignas(64) std::atomic<size_t> _in {};
+    alignas(64) std::atomic<size_t> _out {};
+
+    constexpr Fifo() noexcept { static_assert(SIZE > 1 && !(SIZE & (SIZE-1)), "Read the comments!"); }
+
+    // For mod computation.
+    inline constexpr static size_t MASK = SIZE - 1;
+
+    bool push(T elem) noexcept {
+        // Only producer can modify _in.
+        size_t in = _in.load(std::memory_order_relaxed);
+        size_t next_in = (in+1) & MASK;
+        if(next_in == _out.load(std::memory_order_acquire)) {
+            return false;
+        }
+        _buffer[in] = elem;
+        // Let consumer know your change.
+        _in.store(next_in, std::memory_order_release);
+        return true;
+    }
+
+    void pop(T &opt) noexcept {
+        size_t in = _in.load(std::memory_order_acquire);
+        size_t out = _out.load(std::memory_order_relaxed);
+        if(in == out) return;
+        opt = _buffer[out];
+        _out.store((out+1) & MASK, std::memory_order_release);
+    }
+};
