@@ -7,6 +7,7 @@
 #include <array>
 #include <ranges>
 #include <iterator>
+#include <chrono>
 
 // NOTE.
 #define EXAMPLE_SQPOLL_CONFIG true
@@ -46,8 +47,10 @@ int main() {
     auto server_fd = make_server(8848);
     auto server_fd_cleanup = defer([&](...) { close(server_fd); });
 
+    using namespace std::chrono_literals;
+
     io_uring uring;
-    io_uring_params uring_params = make_sqpoll_params(1000/*ms*/);
+    io_uring_params uring_params = make_sqpoll_params(1s);
 
     constexpr size_t ENTRIES = 256;
     io_uring_queue_init_params(ENTRIES, &uring, &uring_params);

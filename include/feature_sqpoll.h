@@ -1,5 +1,12 @@
 #pragma once
 #include <liburing.h>
+#include <chrono>
+#include <concepts>
+
+template <typename Duration>
+concept chrono_duration = requires(Duration d) {
+    std::chrono::duration_cast<std::chrono::milliseconds>(d);
+};
 
 // https://www.man7.org/linux/man-pages/man2/io_uring_setup.2.html
 //
@@ -45,9 +52,16 @@
 //
 // Conclusion:
 // Using io_uring_submit() with SQPOLL mode is OK.
-inline auto make_sqpoll_params(int idle_ms) {
+inline auto make_sqpoll_params(chrono_duration auto idle_duration) {
     io_uring_params params {};
-    params.flags |= IORING_SETUP_SQPOLL;
-    params.sq_thread_idle = idle_ms;
+    set_sqpoll_params(params, idle_duration);
     return params;
+}
+
+// For pre-defined params.
+inline void set_sqpoll_params(io_uring_params &params, chrono_duration auto idle_duration) {
+    params.flags |= IORING_SETUP_SQPOLL;
+    using namespace std::chrono;
+    auto normal_duration = duration_cast<milliseconds>(idle_duration);
+    params.sq_thread_idle = normal_duration.count();
 }
