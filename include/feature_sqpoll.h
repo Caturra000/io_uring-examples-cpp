@@ -52,16 +52,17 @@ concept chrono_duration = requires(Duration d) {
 //
 // Conclusion:
 // Using io_uring_submit() with SQPOLL mode is OK.
-inline auto make_sqpoll_params(chrono_duration auto idle_duration) {
+inline auto make_sqpoll_params(chrono_duration auto thread_idle) {
     io_uring_params params {};
-    set_sqpoll_params(params, idle_duration);
+    set_sqpoll_params(params, thread_idle);
     return params;
 }
 
 // For pre-defined params.
-inline void set_sqpoll_params(io_uring_params &params, chrono_duration auto idle_duration) {
+inline void set_sqpoll_params(io_uring_params &params, chrono_duration auto thread_idle) /*noexcept*/ {
     params.flags |= IORING_SETUP_SQPOLL;
     using namespace std::chrono;
-    auto normal_duration = duration_cast<milliseconds>(idle_duration);
+    // std::chrono functions are not "noexcept".
+    auto normal_duration = duration_cast<milliseconds>(thread_idle);
     params.sq_thread_idle = normal_duration.count();
 }

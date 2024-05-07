@@ -6,7 +6,7 @@
 #include "utils.h"
 
 // nentries: the number of entries requested in the buffer ring. MUST be a power-of 2 in size.
-auto make_provided_buffers(io_uring *uring, int bgid, unsigned int nentries, size_t per_buffer_size) {
+inline auto make_provided_buffers(io_uring *uring, int bgid, unsigned int nentries, size_t per_buffer_size) {
     int ret;
 
     // https://github.com/axboe/liburing/blob/f7dcc1ea60819475dffd3a45059e16f04381bee7/src/setup.c#L660

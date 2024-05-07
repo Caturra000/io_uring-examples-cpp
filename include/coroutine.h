@@ -208,7 +208,12 @@ public:
         io_context._operations.emplace(task.detach());
     }
 
-    bool push_to_switch(std::coroutine_handle<> h) noexcept { return _switch_fifo.push(h); }
+    // Lock-free for SPSC only.
+    // For MPSC, a user-defined lock should be held to prevent contention.
+    bool push_to_switch(std::coroutine_handle<> h) noexcept { return _switch_spsc.push(h); }
+
+    // TODO:
+    // shutdown();
 
 private:
     void hang() {
@@ -233,7 +238,7 @@ private:
     void run_once_prepare() noexcept {
         // Pull one coroutine to this running context.
         std::coroutine_handle<> h {};
-        _switch_fifo.pop(h);
+        _switch_spsc.pop(h);
         if(h) _operations.emplace(h);
     }
 
@@ -241,32 +246,32 @@ private:
     std::queue<std::coroutine_handle<>> _operations;
     size_t _inflight {};
     bool _stop {false};
-    Fifo<std::coroutine_handle<>, 64> _switch_fifo;
+    Fifo<std::coroutine_handle<>, 64> _switch_spsc;
     // TODO: work_guard;
 };
 
 inline auto async_accept(io_uring *uring, int server_fd,
-        sockaddr *addr, socklen_t *addrlen, int flags = 0) {
+        sockaddr *addr, socklen_t *addrlen, int flags = 0) noexcept {
     return async_operation(uring,
         io_uring_prep_accept, server_fd, addr, addrlen, flags);
 }
 
-inline auto async_accept(io_uring *uring, int server_fd, int flags = 0) {
+inline auto async_accept(io_uring *uring, int server_fd, int flags = 0) noexcept {
     return async_operation(uring,
         io_uring_prep_accept, server_fd, nullptr, nullptr, flags);
 }
 
-inline auto async_read(io_uring *uring, int fd, void *buf, size_t n, int flags = 0) {
+inline auto async_read(io_uring *uring, int fd, void *buf, size_t n, int flags = 0) noexcept {
     return async_operation(uring,
         io_uring_prep_read, fd, buf, n, flags);
 }
 
-inline auto async_write(io_uring *uring, int fd, const void *buf, size_t n, int flags = 0) {
+inline auto async_write(io_uring *uring, int fd, const void *buf, size_t n, int flags = 0) noexcept {
     return async_operation(uring,
         io_uring_prep_write, fd, buf, n, flags);
 }
 
-inline auto async_close(io_uring *uring, int fd) {
+inline auto async_close(io_uring *uring, int fd) noexcept {
     return async_operation(uring,
         io_uring_prep_close, fd);
 }
