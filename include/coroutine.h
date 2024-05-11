@@ -261,14 +261,19 @@ inline auto async_accept(io_uring *uring, int server_fd, int flags = 0) noexcept
         io_uring_prep_accept, server_fd, nullptr, nullptr, flags);
 }
 
-inline auto async_read(io_uring *uring, int fd, void *buf, size_t n, int flags = 0) noexcept {
+// On  files  that  support seeking, if the `offset` is set to -1, the read operation commences at the file offset,
+// and the file offset is incremented by the number of bytes read. See read(2) for more details. Note that for an
+// async API, reading and updating the current file offset may result in unpredictable behavior, unless access to
+// the file is serialized. It is **not encouraged** to use this feature, if it's possible to provide the  desired  IO
+// offset from the application or library.
+inline auto async_read(io_uring *uring, int fd, void *buf, size_t n, uint64_t offset = 0) noexcept {
     return async_operation(uring,
-        io_uring_prep_read, fd, buf, n, flags);
+        io_uring_prep_read, fd, buf, n, offset);
 }
 
-inline auto async_write(io_uring *uring, int fd, const void *buf, size_t n, int flags = 0) noexcept {
+inline auto async_write(io_uring *uring, int fd, const void *buf, size_t n, uint64_t offset = 0) noexcept {
     return async_operation(uring,
-        io_uring_prep_write, fd, buf, n, flags);
+        io_uring_prep_write, fd, buf, n, offset);
 }
 
 inline auto async_close(io_uring *uring, int fd) noexcept {
