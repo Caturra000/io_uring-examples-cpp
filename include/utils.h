@@ -68,7 +68,24 @@ inline int make_server(int port) {
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-    bind(socket_fd, std::bit_cast<const sockaddr *>(&addr), sizeof(addr)) | nofail("bind");
+    // About the strict aliasing rule:
+    // `reinterpret_cast` is OK if we don't derenference it (with the wrong type).
+    // But what about the implementation of `bind()`?
+    //   - `bind()` must dereference the object with a wrong type.
+    // Can we memcpy an actual `sockaddr` from `sockaddr_xxx` then pass it to `bind()`?
+    //   - Normally, memcpy is a good way to make type punning safe.
+    //   - It is guaranteed by the C (and C++) standard to access through an object.
+    //   - But answer is NO, because `sizeof(sockaddr_xxx) <= sizeof(sockaddr)` is not necessarily true.
+    //   - How can you access an object without proper size and alignment?
+    //   - `std::launder()` with cast / `std::start_lifetime_as()` cannot solve the `sizeof()` problem either.
+    // Does it violate the strict aliasing rule?
+    //   - Maybe. It depends on the library side. We cant do any more.
+    //   - But many people explicitly cast types with UNIX interfaces.
+    //   - And compilers should not offend users, especially for legacy codes.
+    //   - So practically, it is OK.
+    auto no_alias_addr = reinterpret_cast<const sockaddr*>(&addr);
+
+    bind(socket_fd, no_alias_addr, sizeof(addr)) | nofail("bind");
 
     listen(socket_fd, 128) | nofail("listen");
 

@@ -43,7 +43,7 @@ void print_to_stdout(const auto &iovecs, size_t size_bytes, size_t chunk_size) {
     assert(chunks == iovecs.size());
     auto printer = std::ostream_iterator<char>{std::cout};
     for(auto &iov : iovecs) {
-        std::copy_n(std::bit_cast<char*>(iov.iov_base), iov.iov_len, printer);
+        std::copy_n(static_cast<char*>(iov.iov_base), iov.iov_len, printer);
     }
 }
 
