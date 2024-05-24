@@ -42,7 +42,7 @@ Task server(io_uring *uring, Io_context &io_context, int server_fd) {
 }
 
 int main() {
-    auto server_fd = make_server(8848);
+    auto server_fd = make_server({.port=8848});
     auto server_fd_cleanup = defer([&](...) { close(server_fd); });
 
     io_uring uring;

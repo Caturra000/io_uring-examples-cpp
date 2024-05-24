@@ -7,7 +7,7 @@
 // In this program, server does nothing but accept new connections.
 // It will accept exactly 3 clients, then exit normally.
 int main() {
-    auto server_fd = make_server(8848);
+    auto server_fd = make_server({.port=8848});
     auto server_fd_cleanup = defer([&](...) { close(server_fd); });
 
     io_uring uring;

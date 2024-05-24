@@ -57,15 +57,29 @@ inline auto defer(auto func) {
     return std::unique_ptr<void, decltype(func)>{dummy, std::move(func)};
 }
 
+// For make_server().
+struct make_server_option_t {
+    int port {8848};
+    int backlog {128};
+    bool nonblock {false};
+    bool reuseaddr {true};
+    bool reuseport {false};
+};
+
 // Do some boring stuff and return a server fd.
-inline int make_server(int port) {
-    int socket_fd = socket(AF_INET, SOCK_STREAM, 0) | nofail("socket");
-    int enable = 1;
-    setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) | nofail("setsockopt");
+inline int make_server(make_server_option_t option) {
+    int socket_flag = option.nonblock ? SOCK_NONBLOCK : 0;
+    int socket_fd = socket(AF_INET, SOCK_STREAM, socket_flag) | nofail("socket");
+
+    auto setsock = [enable = 1, fd = socket_fd](int optname) {
+        setsockopt(fd, SOL_SOCKET, optname, &enable, sizeof(int)) | nofail("setsockopt");
+    };
+    if(option.reuseaddr) setsock(SO_REUSEADDR);
+    if(option.reuseport) setsock(SO_REUSEPORT);
 
     sockaddr_in addr {};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
+    addr.sin_port = htons(option.port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     // About the strict aliasing rule:
@@ -87,7 +101,7 @@ inline int make_server(int port) {
 
     bind(socket_fd, no_alias_addr, sizeof(addr)) | nofail("bind");
 
-    listen(socket_fd, 128) | nofail("listen");
+    listen(socket_fd, option.backlog) | nofail("listen");
 
     return socket_fd;
 }
