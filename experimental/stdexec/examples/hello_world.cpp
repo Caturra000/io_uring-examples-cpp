@@ -7,7 +7,7 @@
 int main() {
     constexpr auto test_file_name = "/tmp/jojo";
     int fd = (::unlink(test_file_name), ::open(test_file_name, O_RDWR|O_TRUNC|O_CREAT, 0666));
-    if(fd < 0 || ::write(fd, "dio", 3) != 3) {
+    if(fd < 0) {
         std::cerr << ::strerror(errno) , std::abort();
     }
 
@@ -20,23 +20,27 @@ int main() {
             std::cout << "hello ";
             return 19260816;
         })
-      | stdexec::let_value([](int v) {
-            return stdexec::just(v+1);
-        }); // or then(...)
+      | stdexec::then([](int v) {
+            return v+1;
+        });
 
     auto s2 =
         stdexec::schedule(scheduler)
-      | stdexec::then([] {
+      | stdexec::let_value([] {
             std::cout << "world!" << std::endl;
-            return std::array<char, 5>{};
+            return stdexec::just(std::array<char, 4> {"dio"}); // '\n'
         })
-      | stdexec::let_value([=](auto &buf) {
-            return async_read(scheduler, fd, buf.data(), buf.size())
-              | stdexec::then([&](auto nread) {
-                    auto bview = buf | std::views::take(nread);
-                    for(auto b : bview) std::cout << b;
-                    std::cout << std::endl;
-                    return nread;
+      | stdexec::let_value([scheduler, fd](auto &&buf) {
+            return
+                async_write(scheduler, fd, buf.data(), buf.size() - 1)
+              | stdexec::let_value([&](auto written_bytes) {
+                    return async_read(scheduler, fd, buf.data(), written_bytes);
+                })
+              | stdexec::then([&buf](auto read_bytes) {
+                    auto iter = std::ostream_iterator<char>{std::cout};
+                    [&](auto &&...views) { (std::ranges::copy(views, iter), ...); }
+                        ("read: [", buf | std::views::take(read_bytes), "]\n");
+                    return read_bytes;
                 });
         });
 
@@ -49,6 +53,6 @@ int main() {
     auto a =
         stdexec::when_all(std::move(s1), std::move(s2));
     auto [v1, v2] = stdexec::sync_wait(std::move(a)).value();
-    ::unlink(test_file_name);
-    std::cout << v1 << ' ' << v2 << std::endl;
+    std::cout << "s1: " << v1 << std::endl
+              << "s2: " << v2 << std::endl;
 }
