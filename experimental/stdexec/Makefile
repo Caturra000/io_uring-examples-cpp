@@ -3,7 +3,7 @@
 INCLUDE = include
 EXAMPLES = examples
 BUILD = build
-ALL_TARGET_NAME = hello_world
+ALL_TARGET_NAME = hello_world timer
 
 CXX_FLAGS = -std=c++20 -Wall -Wextra -g -I$(INCLUDE) $^ -luring -pthread
 CXX_FLAGS_DEBUG =

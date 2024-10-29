@@ -1,5 +1,6 @@
 #pragma once
 #include <cstring>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <tuple>
@@ -179,6 +180,17 @@ struct io_uring_exec_initiating_operation: io_uring_exec::uring_operation {
     inline constexpr static vtable this_vtable {
         .complete = [](auto *_self, result_t cqe_res) noexcept {
             auto self = static_cast<io_uring_exec_initiating_operation*>(_self);
+
+            // Zero overhead for regular operations.
+            if constexpr (F == io_uring_prep_timeout) {
+                auto good = [cqe_res](auto ...errors) { return ((cqe_res == errors) || ...); };
+                // Timed out is not an error.
+                if(good(-ETIME, -ETIMEDOUT)) {
+                    stdexec::set_value(std::move(self->receiver), cqe_res);
+                    return;
+                }
+            }
+
             if(cqe_res == -ECANCELED) {
                 stdexec::set_stopped(std::move(self->receiver));
             } else if(cqe_res < 0) {
@@ -236,4 +248,17 @@ auto async_read(io_uring_exec::scheduler s, int fd, void *buf, size_t n, uint64_
 stdexec::sender
 auto async_write(io_uring_exec::scheduler s, int fd, const void *buf, size_t n, uint64_t offset = 0) noexcept {
     return make_uring_sender<io_uring_prep_write>(s, fd, buf, n, offset);
+}
+
+stdexec::sender
+auto async_wait(io_uring_exec::scheduler s, std::chrono::milliseconds duration) noexcept {
+    using namespace std::chrono;
+    auto duration_s = duration_cast<seconds>(duration);
+    auto duration_ns = duration_cast<nanoseconds>(duration - duration_s);
+    return
+        // `ts` needs safe lifetime within an asynchronous scope.
+        stdexec::just(__kernel_timespec {.tv_sec = duration_s.count(), .tv_nsec = duration_ns.count()})
+      | stdexec::let_value([s](auto &&ts) {
+            return make_uring_sender<io_uring_prep_timeout, __kernel_timespec*, unsigned, unsigned>(s, &ts, 0, 0);
+        });
 }
