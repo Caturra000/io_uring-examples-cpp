@@ -14,9 +14,9 @@ struct immovable {
 };
 
 struct io_uring_exec: immovable {
-    io_uring_exec(size_t uring_entries, int uring_flags = 0) {
+    io_uring_exec(size_t uring_entries, int uring_flags = 0): _head{{}, {}} {
         if(int err = io_uring_queue_init(uring_entries, &_underlying_uring, uring_flags)) {
-            throw std::runtime_error(::strerror(-err));
+            throw std::system_error(-err, std::system_category());
         }
     }
 
@@ -24,18 +24,22 @@ struct io_uring_exec: immovable {
         io_uring_queue_exit(&_underlying_uring);
     }
 
-    // (Receiver) Types erasure support.
-    template <typename Result>
-    struct vtable {
-        using result_t = Result;
-        virtual void complete(result_t) = 0;
+    // Per-object vtable for (receiver) type erasure.
+    template <typename ...>
+    struct make_vtable;
+
+    template <typename Ret, typename ...Args>
+    struct make_vtable<Ret(Args...)> {
+        Ret (*complete)(Args...);
+        // Ret (*ready)(Args...);
     };
 
     // All the tasks are asynchronous.
     // The `task` struct is queued by a user-space intrusive queue.
     // NOTE: The io_uring-specified task is queued by an interal ring of io_uring.
-    struct task: immovable, vtable<decltype(std::ignore)> {
-        void complete(result_t) override {}
+    struct task: immovable {
+        using vtable = make_vtable<void(task*)>;
+        vtable vtab;
         task *next{this};
     };
 
@@ -43,16 +47,21 @@ struct io_uring_exec: immovable {
     template <stdexec::receiver Receiver>
     struct operation: task {
         using operation_state_concept = stdexec::operation_state_t;
-        operation(Receiver receiver, io_uring_exec *uring) noexcept
-            : receiver(std::move(receiver)), uring(uring) {}
+
         void start() noexcept {
             uring->push(this);
         }
-        void complete(result_t) override {
-            stdexec::set_value(std::move(receiver));
-        }
+
+        inline constexpr static vtable this_vtable {
+            .complete = [](task *_self) noexcept {
+                auto self = static_cast<operation*>(_self);
+                stdexec::set_value(std::move(self->receiver));
+            }
+        };
+
         Receiver receiver;
         io_uring_exec *uring;
+
     };
 
     // Required by stdexec.
@@ -64,7 +73,7 @@ struct io_uring_exec: immovable {
                                         stdexec::set_stopped_t()>;
         template <stdexec::receiver Receiver>
         operation<Receiver> connect(Receiver receiver) noexcept {
-            return {std::move(receiver), uring};
+            return {{{}, operation<Receiver>::this_vtable}, std::move(receiver), uring};
         }
         io_uring_exec *uring;
     };
@@ -79,9 +88,10 @@ struct io_uring_exec: immovable {
     scheduler get_scheduler() noexcept { return {this}; }
 
     // External structured callbacks support.
-    struct uring_operation {
+    struct uring_operation: immovable {
         using result_t = decltype(std::declval<io_uring_cqe>().res);
-        using base = vtable<result_t>;
+        using vtable = make_vtable<void(uring_operation*, result_t)>;
+        vtable vtab;
     };
 
     // TODO: Concurrent run().
@@ -89,7 +99,7 @@ struct io_uring_exec: immovable {
         // TODO: stop_token.
         for(task *first_task;;) {
             for(task *op = first_task = pop(); op; op = pop()) {
-                op->complete(std::ignore);
+                op->vtab.complete(op);
             }
 
             {
@@ -106,8 +116,8 @@ struct io_uring_exec: immovable {
             // NOTE: One sqe can generate multiple cqes.
             io_uring_for_each_cqe(&_underlying_uring, head, cqe) {
                 done++;
-                auto uring_op = std::bit_cast<uring_operation::base*>(cqe->user_data);
-                uring_op->complete(cqe->res);
+                auto uring_op = std::bit_cast<uring_operation*>(cqe->user_data);
+                uring_op->vtab.complete(uring_op, cqe->res);
             }
             if(done) {
                 io_uring_cq_advance(&_underlying_uring, done);
@@ -140,19 +150,19 @@ struct io_uring_exec: immovable {
 };
 
 template <auto F, stdexec::receiver Receiver, typename ...Args>
-struct io_uring_exec_initiating_operation: immovable, io_uring_exec::uring_operation::base {
+struct io_uring_exec_initiating_operation: io_uring_exec::uring_operation {
     using operation_state_concept = stdexec::operation_state_t;
     io_uring_exec_initiating_operation(Receiver receiver,
                                        io_uring_exec *uring,
                                        std::tuple<Args...> args) noexcept
-        : receiver(std::move(receiver)),
+        : io_uring_exec::uring_operation{{}, this_vtable},
+          receiver(std::move(receiver)),
           uring(uring),
           args(std::move(args)) {}
 
     void start() noexcept {
         if(auto sqe = io_uring_get_sqe(&uring->_underlying_uring)) [[likely]] {
-            using operation_base = io_uring_exec::uring_operation::base;
-            io_uring_sqe_set_data(sqe, static_cast<operation_base*>(this));
+            io_uring_sqe_set_data(sqe, static_cast<io_uring_exec::uring_operation*>(this));
             std::apply(F, std::tuple_cat(std::tuple(sqe), std::move(args)));
         } else {
             // RETURN VALUE
@@ -161,22 +171,25 @@ struct io_uring_exec_initiating_operation: immovable, io_uring_exec::uring_opera
             // the SQ ring is currently full and entries must be submitted  for
             // processing before new ones can get allocated.
             auto error = std::make_exception_ptr(
-                        std::system_error(EBUSY, std::generic_category()));
+                        std::system_error(EBUSY, std::system_category()));
             stdexec::set_error(std::move(receiver), std::move(error));
         }
     }
 
-    void complete(result_t cqe_res) override {
-        if(cqe_res == -ECANCELED) {
-            stdexec::set_stopped(std::move(receiver));
-        } else if(cqe_res < 0) {
-            auto error = std::make_exception_ptr(
-                        std::system_error(-cqe_res, std::generic_category()));
-            stdexec::set_error(std::move(receiver), std::move(error));
-        } else [[likely]] {
-            stdexec::set_value(std::move(receiver), cqe_res);
+    inline constexpr static vtable this_vtable {
+        .complete = [](auto *_self, result_t cqe_res) noexcept {
+            auto self = static_cast<io_uring_exec_initiating_operation*>(_self);
+            if(cqe_res == -ECANCELED) {
+                stdexec::set_stopped(std::move(self->receiver));
+            } else if(cqe_res < 0) {
+                auto error = std::make_exception_ptr(
+                            std::system_error(-cqe_res, std::system_category()));
+                stdexec::set_error(std::move(self->receiver), std::move(error));
+            } else [[likely]] {
+                stdexec::set_value(std::move(self->receiver), cqe_res);
+            }
         }
-    }
+    };
 
     Receiver receiver;
     io_uring_exec *uring;
