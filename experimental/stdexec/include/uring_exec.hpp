@@ -89,9 +89,9 @@ struct io_uring_exec: immovable {
     scheduler get_scheduler() noexcept { return {this}; }
 
     // External structured callbacks support.
-    struct uring_operation: immovable {
+    struct io_uring_exec_operation_base: immovable {
         using result_t = decltype(std::declval<io_uring_cqe>().res);
-        using vtable = make_vtable<void(uring_operation*, result_t)>;
+        using vtable = make_vtable<void(io_uring_exec_operation_base*, result_t)>;
         vtable vtab;
     };
 
@@ -117,7 +117,7 @@ struct io_uring_exec: immovable {
             // NOTE: One sqe can generate multiple cqes.
             io_uring_for_each_cqe(&_underlying_uring, head, cqe) {
                 done++;
-                auto uring_op = std::bit_cast<uring_operation*>(cqe->user_data);
+                auto uring_op = std::bit_cast<io_uring_exec_operation_base*>(cqe->user_data);
                 uring_op->vtab.complete(uring_op, cqe->res);
             }
             if(done) {
@@ -151,19 +151,19 @@ struct io_uring_exec: immovable {
 };
 
 template <auto F, stdexec::receiver Receiver, typename ...Args>
-struct io_uring_exec_initiating_operation: io_uring_exec::uring_operation {
+struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
     using operation_state_concept = stdexec::operation_state_t;
-    io_uring_exec_initiating_operation(Receiver receiver,
+    io_uring_exec_operation(Receiver receiver,
                                        io_uring_exec *uring,
                                        std::tuple<Args...> args) noexcept
-        : io_uring_exec::uring_operation{{}, this_vtable},
+        : io_uring_exec_operation_base{{}, this_vtable},
           receiver(std::move(receiver)),
           uring(uring),
           args(std::move(args)) {}
 
     void start() noexcept {
         if(auto sqe = io_uring_get_sqe(&uring->_underlying_uring)) [[likely]] {
-            io_uring_sqe_set_data(sqe, static_cast<io_uring_exec::uring_operation*>(this));
+            io_uring_sqe_set_data(sqe, static_cast<io_uring_exec_operation_base*>(this));
             std::apply(F, std::tuple_cat(std::tuple(sqe), std::move(args)));
         } else {
             // RETURN VALUE
@@ -179,26 +179,33 @@ struct io_uring_exec_initiating_operation: io_uring_exec::uring_operation {
 
     inline constexpr static vtable this_vtable {
         .complete = [](auto *_self, result_t cqe_res) noexcept {
-            auto self = static_cast<io_uring_exec_initiating_operation*>(_self);
+            auto self = static_cast<io_uring_exec_operation*>(_self);
+
+            constexpr auto is_timer = [] {
+                // Make GCC happy.
+                if constexpr (requires { F == &io_uring_prep_timeout; })
+                    return F == &io_uring_prep_timeout;
+                return false;
+            } ();
 
             // Zero overhead for regular operations.
-            if constexpr (F == io_uring_prep_timeout) {
+            if constexpr (is_timer) {
                 auto good = [cqe_res](auto ...errors) { return ((cqe_res == errors) || ...); };
                 // Timed out is not an error.
-                if(good(-ETIME, -ETIMEDOUT)) {
+                if(good(-ETIME, -ETIMEDOUT)) [[likely]] {
                     stdexec::set_value(std::move(self->receiver), cqe_res);
                     return;
                 }
             }
 
-            if(cqe_res == -ECANCELED) {
+            if(cqe_res >= 0) [[likely]] {
+                stdexec::set_value(std::move(self->receiver), cqe_res);
+            } else if(cqe_res == -ECANCELED) {
                 stdexec::set_stopped(std::move(self->receiver));
-            } else if(cqe_res < 0) {
+            } else {
                 auto error = std::make_exception_ptr(
                             std::system_error(-cqe_res, std::system_category()));
                 stdexec::set_error(std::move(self->receiver), std::move(error));
-            } else [[likely]] {
-                stdexec::set_value(std::move(self->receiver), cqe_res);
             }
         }
     };
@@ -208,16 +215,18 @@ struct io_uring_exec_initiating_operation: io_uring_exec::uring_operation {
     std::tuple<Args...> args;
 };
 
-template <auto F, typename ...Args>
+using io_uring_exec_operation_base = io_uring_exec::io_uring_exec_operation_base;
+
+template <auto io_uring_prep_invocable, typename ...Args>
 struct io_uring_exec_sender {
     using sender_concept = stdexec::sender_t;
     using completion_signatures = stdexec::completion_signatures<
-                                    stdexec::set_value_t(io_uring_exec::uring_operation::result_t),
+                                    stdexec::set_value_t(io_uring_exec_operation_base::result_t),
                                     stdexec::set_error_t(std::exception_ptr),
                                     stdexec::set_stopped_t()>;
 
     template <stdexec::receiver Receiver>
-    io_uring_exec_initiating_operation<F, Receiver, Args...>
+    io_uring_exec_operation<io_uring_prep_invocable, Receiver, Args...>
     connect(Receiver receiver) noexcept {
         return {std::move(receiver), uring, std::move(args)};
     }
@@ -226,13 +235,20 @@ struct io_uring_exec_sender {
     std::tuple<Args...> args;
 };
 
-// A sender factory.
-template <auto F, typename ...Args>
+template <auto io_uring_prep_invocable, typename ...Args>
 stdexec::sender_of<
-    stdexec::set_value_t(io_uring_exec::uring_operation::result_t /* cqe->res */),
+    stdexec::set_value_t(io_uring_exec_operation_base::result_t /* cqe->res */),
     stdexec::set_error_t(std::exception_ptr)>
-auto make_uring_sender(io_uring_exec::scheduler s, Args ...args) noexcept {
-    return io_uring_exec_sender<F, Args...>{s.uring, std::tuple(std::move(args)...)};
+auto make_uring_sender(std::in_place_t,
+                       io_uring_exec::scheduler s, std::tuple<Args...> &&t_args) noexcept {
+    return io_uring_exec_sender<io_uring_prep_invocable, Args...>{s.uring, std::move(t_args)};
+}
+
+// A sender factory.
+template <auto io_uring_prep_invocable>
+auto make_uring_sender(io_uring_exec::scheduler s, auto &&...args) noexcept {
+    return make_uring_sender<io_uring_prep_invocable>
+        (std::in_place, s, std::tuple(static_cast<decltype(args)&&>(args)...));
 }
 
 // On  files  that  support seeking, if the `offset` is set to -1, the read operation commences at the file offset,
@@ -257,8 +273,14 @@ auto async_wait(io_uring_exec::scheduler s, std::chrono::milliseconds duration) 
     auto duration_ns = duration_cast<nanoseconds>(duration - duration_s);
     return
         // `ts` needs safe lifetime within an asynchronous scope.
-        stdexec::just(__kernel_timespec {.tv_sec = duration_s.count(), .tv_nsec = duration_ns.count()})
+        stdexec::just(__kernel_timespec {
+            .tv_sec = duration_s.count(),
+            .tv_nsec = duration_ns.count()
+        })
       | stdexec::let_value([s](auto &&ts) {
-            return make_uring_sender<io_uring_prep_timeout, __kernel_timespec*, unsigned, unsigned>(s, &ts, 0, 0);
+            return make_uring_sender<io_uring_prep_timeout>(std::in_place, s,
+                []<typename R, typename ...Ts>(R(io_uring_sqe*, Ts...), auto &&...args) {
+                    return std::tuple<Ts...>{static_cast<decltype(args)&&>(args)...};
+                }(io_uring_prep_timeout, &ts, 0, 0));
         });
 }
