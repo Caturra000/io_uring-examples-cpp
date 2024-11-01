@@ -96,29 +96,45 @@ struct io_uring_exec: immovable {
     };
 
     struct run_policy {
-        bool once {false};
-        bool compute {true};
+        // Informal forward progress guarantees.
+        // NOTES:
+        // * These are exclusive flags, but using bool (not enum) for simplification.
+        // * `weakly_concurrent` is not a C++ standard part, which can make progress eventually
+        //   with lower overhead compared to `concurrent`, provided it is used properly.
+        // * `parallel` (which makes progress per `step`) is NOT supported for IO operations.
+        bool concurrent {true};         // which requires that a thread makes progress eventually.
+        bool weakly_parallel {false};   // which does not require that the thread makes progress.
+        bool weakly_concurrent {false}; // which requires that a thread may make progress eventually.
+
+        // Event handling.
+        // Any combination is welcome.
+        bool launch {true};
         bool submit {true};
         bool iodone {true};
-        bool busyloop {false};
-        // WORK IN PROGRESS!
-        // Some intrusive queues are within the same thread.
-        // bool lockless {false};
+
+        // Behavior details.
+        bool busyloop {false};          // No yield.
+        bool quitable {false};          // `concurrent` runs infinitely by default.
+        bool lockless {false};          // (WIP) Some intrusive queues are within the same thread.
+        bool realtime {false};          // (WIP) No delayed process.
     };
 
-    // TODO: Concurrent run().
     template <run_policy policy = {}>
     void run() {
-        unsigned done {};    // For `io_uring_for_each_cqe`.
-        task *first_task {}; // For empty queue detection.
-        ssize_t local_inflight {};  // May be negative.
-        size_t done_accumulated {}; // == \sum done.
+        // Progress.
+        task *first_task {};        // For empty queue detection.
+        size_t submitted {};        // For `io_uring_submit`.
+        size_t done {};             // For `io_uring_for_each_cqe`.
+
+        // (WIP)
         // Delayed process to minimize the lock acquisition.
-        // WORK IN PROGRSS!
+        // Finally, we synchronize `_inflight` with `all_done`.
+        size_t all_done {};         // Push value (\sum `done`).
+        size_t local_inflight {};   // Pull value.
 
         // TODO: stop_token.
         for(;;) {
-            if constexpr (policy.compute) {
+            if constexpr (policy.launch) {
                 for(task *op = first_task = pop(); op; op = pop()) {
                     op->vtab.complete(op);
                 }
@@ -127,7 +143,8 @@ struct io_uring_exec: immovable {
             // Need to push/pull (local_)inflight value if there is no submission policy.
             if constexpr (policy.submit) {
                 std::lock_guard _{_mutex};
-                _inflight += io_uring_submit(&_underlying_uring);
+                submitted = io_uring_submit(&_underlying_uring);
+                _inflight += submitted;
                 local_inflight = _inflight;
                 // When escaping from this scope, we can't access _inflight without mutex.
                 // Use local_inflight instead.
@@ -146,26 +163,30 @@ struct io_uring_exec: immovable {
                     uring_op->vtab.complete(uring_op, cqe->res);
                 }
                 if(done) {
-                    done_accumulated += done;
+                    all_done += done;
                     io_uring_cq_advance(&_underlying_uring, done);
-                } else if(!first_task && !local_inflight) {
-                    if constexpr (policy.once) return;
-
-                    if constexpr (policy.busyloop);
-                    else std::this_thread::yield();
                 }
             }
 
-            if constexpr (policy.once) {
-                if /****/ constexpr ( policy.compute && !policy.iodone) {
-                    if(!first_task) return;
-                } else if constexpr (!policy.compute &&  policy.iodone) {
-                    if(!local_inflight) return;
-                } else if constexpr ( policy.compute &&  policy.iodone) {
-                    if(!first_task && !local_inflight) return;
-                } else {
-                    // Sumbit only? Strange but OK.
-                }
+            if constexpr (policy.weakly_parallel) {
+                return;
+            }
+
+            bool any_progress = false;
+            if constexpr (policy.launch) any_progress |= bool(first_task);
+            if constexpr (policy.submit) any_progress |= bool(submitted);
+            if constexpr (policy.iodone) any_progress |= bool(done);
+
+            if constexpr (policy.weakly_concurrent) {
+                if(any_progress) return;
+            }
+
+            if constexpr (!policy.busyloop) {
+                if(any_progress) std::this_thread::yield();
+            }
+
+            if constexpr (policy.quitable) {
+                if(!any_progress && !local_inflight) return;
             }
         }
     }
