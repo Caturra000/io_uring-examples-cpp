@@ -95,35 +95,77 @@ struct io_uring_exec: immovable {
         vtable vtab;
     };
 
+    struct run_policy {
+        bool once {false};
+        bool compute {true};
+        bool submit {true};
+        bool iodone {true};
+        bool busyloop {false};
+        // WORK IN PROGRESS!
+        // Some intrusive queues are within the same thread.
+        // bool lockless {false};
+    };
+
     // TODO: Concurrent run().
+    template <run_policy policy = {}>
     void run() {
+        unsigned done {};    // For `io_uring_for_each_cqe`.
+        task *first_task {}; // For empty queue detection.
+        ssize_t local_inflight {};  // May be negative.
+        size_t done_accumulated {}; // == \sum done.
+        // Delayed process to minimize the lock acquisition.
+        // WORK IN PROGRSS!
+
         // TODO: stop_token.
-        for(task *first_task;;) {
-            for(task *op = first_task = pop(); op; op = pop()) {
-                op->vtab.complete(op);
+        for(;;) {
+            if constexpr (policy.compute) {
+                for(task *op = first_task = pop(); op; op = pop()) {
+                    op->vtab.complete(op);
+                }
             }
 
-            {
+            // Need to push/pull (local_)inflight value if there is no submission policy.
+            if constexpr (policy.submit) {
                 std::lock_guard _{_mutex};
-                // Return value is ignored.
-                // See the comments on `coroutine.h`.
-                io_uring_submit(&_underlying_uring);
+                _inflight += io_uring_submit(&_underlying_uring);
+                local_inflight = _inflight;
+                // When escaping from this scope, we can't access _inflight without mutex.
+                // Use local_inflight instead.
             }
 
-            io_uring_cqe *cqe;
-            unsigned head;
-            unsigned done = 0;
-            // Reap one operation / multiple operations.
-            // NOTE: One sqe can generate multiple cqes.
-            io_uring_for_each_cqe(&_underlying_uring, head, cqe) {
-                done++;
-                auto uring_op = std::bit_cast<io_uring_exec_operation_base*>(cqe->user_data);
-                uring_op->vtab.complete(uring_op, cqe->res);
+            if constexpr (policy.iodone) {
+                io_uring_cqe *cqe;
+                unsigned head;
+                done = 0;
+                // Reap one operation / multiple operations.
+                // NOTE: One sqe can generate multiple cqes.
+                io_uring_for_each_cqe(&_underlying_uring, head, cqe) {
+                    done++;
+                    using uop = io_uring_exec_operation_base;
+                    auto uring_op = std::bit_cast<uop*>(cqe->user_data);
+                    uring_op->vtab.complete(uring_op, cqe->res);
+                }
+                if(done) {
+                    done_accumulated += done;
+                    io_uring_cq_advance(&_underlying_uring, done);
+                } else if(!first_task && !local_inflight) {
+                    if constexpr (policy.once) return;
+
+                    if constexpr (policy.busyloop);
+                    else std::this_thread::yield();
+                }
             }
-            if(done) {
-                io_uring_cq_advance(&_underlying_uring, done);
-            } else if(!first_task) {
-                std::this_thread::yield();
+
+            if constexpr (policy.once) {
+                if /****/ constexpr ( policy.compute && !policy.iodone) {
+                    if(!first_task) return;
+                } else if constexpr (!policy.compute &&  policy.iodone) {
+                    if(!local_inflight) return;
+                } else if constexpr ( policy.compute &&  policy.iodone) {
+                    if(!first_task && !local_inflight) return;
+                } else {
+                    // Sumbit only? Strange but OK.
+                }
             }
         }
     }
@@ -144,6 +186,9 @@ struct io_uring_exec: immovable {
         op->next = &_head;
         _tail = _tail->next = op;
     }
+
+    // See the comments on `coroutine.h` and `config.h`.
+    size_t /*_inaccurate*/ _inflight {};
 
     task _head, *_tail{&_head};
     std::mutex _mutex;
