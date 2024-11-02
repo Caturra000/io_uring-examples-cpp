@@ -41,7 +41,7 @@ struct io_uring_exec: immovable {
     struct task: immovable {
         using vtable = make_vtable<void(task*)>;
         vtable vtab;
-        task *next{this};
+        task *next {nullptr};
     };
 
     // Required by stdexec.
@@ -135,14 +135,17 @@ struct io_uring_exec: immovable {
         // TODO: stop_token.
         for(;;) {
             if constexpr (policy.launch) {
-                for(task *op = first_task = pop(); op; op = pop()) {
+                auto [first, last] = move_task_queue();
+                if(first) for(auto op = first;; op = op->next) {
                     op->vtab.complete(op);
+                    if(op == last) break;
                 }
+                first_task = first;
             }
 
             // Need to push/pull (local_)inflight value if there is no submission policy.
             if constexpr (policy.submit) {
-                std::lock_guard _{_mutex};
+                std::lock_guard guard {_submit_mutex};
                 submitted = io_uring_submit(&_underlying_uring);
                 _inflight += submitted;
                 local_inflight = _inflight;
@@ -191,28 +194,30 @@ struct io_uring_exec: immovable {
         }
     }
 
-    task* pop() noexcept {
-        // Read only.
-        if(_head.next == &_head) {
-            return nullptr;
-        }
-        std::lock_guard _{_mutex};
-        auto popped = std::exchange(_head.next, _head.next -> next);
-        if(popped == _tail) _tail = &_head;
-        return popped;
+    void push(task *op) noexcept {
+        std::lock_guard _{_tail_mutex};
+        std::unique_lock may_own {_head_mutex, std::defer_lock};
+        if(_tail == &_head) may_own.lock();
+        _tail = _tail->next = op;
     }
 
-    void push(task *op) noexcept {
-        std::lock_guard _{_mutex};
-        op->next = &_head;
-        _tail = _tail->next = op;
+    // No pop(), just move.
+    std::pair<task*, task*> move_task_queue() noexcept {
+        // Don't use std::scoped_lock;
+        // its ordering algorithm is implementation-defined.
+        std::lock_guard _1 {_tail_mutex};
+        std::lock_guard _2 {_head_mutex};
+        auto first = std::exchange(_head.next, nullptr);
+        auto last = std::exchange(_tail, &_head);
+        return {first, last};
     }
 
     // See the comments on `coroutine.h` and `config.h`.
     size_t /*_inaccurate*/ _inflight {};
 
     task _head, *_tail{&_head};
-    std::mutex _mutex;
+    std::mutex _head_mutex, _tail_mutex;
+    std::mutex _submit_mutex;
     io_uring _underlying_uring;
 };
 
@@ -228,10 +233,12 @@ struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
           args(std::move(args)) {}
 
     void start() noexcept {
+        std::unique_lock guard {uring->_submit_mutex};
         if(auto sqe = io_uring_get_sqe(&uring->_underlying_uring)) [[likely]] {
             io_uring_sqe_set_data(sqe, static_cast<io_uring_exec_operation_base*>(this));
             std::apply(F, std::tuple_cat(std::tuple(sqe), std::move(args)));
         } else {
+            guard.unlock();
             // RETURN VALUE
             // io_uring_get_sqe(3)  returns  a  pointer  to the next submission
             // queue event on success and NULL on failure. If NULL is returned,
