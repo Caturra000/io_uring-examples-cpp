@@ -93,6 +93,7 @@ struct io_uring_exec: immovable {
         using result_t = decltype(std::declval<io_uring_cqe>().res);
         using vtable = make_vtable<void(io_uring_exec_operation_base*, result_t)>;
         vtable vtab;
+        std::atomic<bool> seen {false};
     };
 
     struct run_policy {
@@ -122,28 +123,44 @@ struct io_uring_exec: immovable {
     };
 
     // Run with customizable policy.
-    // If you want to change a few options based on a default config.
-    // Try this:
+    // If you want to change a few options based on a default config, try this way:
+    // ```
     // constexpr auto policy = [] {
     //     auto policy = io_uring_exec::run_policy{};
     //     policy.launch = false;
+    //     policy.realtime = true;
+    //     // ...
     //     return policy;
     // } ();
     // uring.run<policy>();
+    // ```
     template <run_policy policy = {}>
     void run() {
         // Progress.
         task *first_task {};        // For empty queue detection.
-        size_t submitted {};        // For `io_uring_submit`.
-        size_t done {};             // For `io_uring_for_each_cqe`.
+        ssize_t submitted {};       // For `io_uring_submit`.
+        ssize_t done {};            // For `io_uring_for_each_cqe`.
 
         // Deferred processing.
-        size_t local_inflight {};
-        constexpr size_t sync_ratio = 8;
+        bool deferred_initialization {};
+        ssize_t local_inflight {};
+        ssize_t plugged_done {};
+        constexpr size_t scheduled_sync_ratio = 32;
+
+        auto unplug = [&](...) {
+            if constexpr (policy.realtime) return;
+            if(plugged_done == 0) return;
+            _inflight.fetch_sub(plugged_done);
+        };
+        auto make_STL_happy = reinterpret_cast<void*>(0x1);
+        auto unplug_on_exit = std::unique_ptr<void, decltype(unplug)>
+                                {make_STL_happy, std::move(unplug)};
 
         // TODO: stop_token.
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
+                // TODO: Optimzied to a lockfree version?
+                // But the move operation is just trying to lock once...
                 auto [first, last] = move_task_queue();
                 if(first) for(auto op = first;; op = op->next) {
                     op->vtab.complete(op);
@@ -152,36 +169,59 @@ struct io_uring_exec: immovable {
                 first_task = first;
             }
 
-            // Need to push/pull (local_)inflight value if there is no submission policy.
+            // `_inflight` is only needed when `autoquit` is enabled.
+            // We can do deferred processing on it to avoid any communication overhead.
+    
             if constexpr (policy.submit) {
+                // Must hold a lock. There are many data races
+                // between sqe allocation/preparation and submission.
                 std::lock_guard guard {_submit_mutex};
+                // TODO: wait_{one|some|all}.
                 if constexpr (policy.waitable) {
-                    // TODO: wait_{one|some|all}.
                     submitted = io_uring_submit_and_wait(&_underlying_uring, 1);
                 } else {
                     submitted = io_uring_submit(&_underlying_uring);
                 }
-                _inflight += submitted - /*last*/ done;
-                local_inflight = _inflight;
-                // When escaping from this scope, we can't access _inflight without mutex.
-                // Use local_inflight instead.
             }
 
             if constexpr (policy.iodone) {
                 io_uring_cqe *cqe;
-                unsigned head;
                 done = 0;
-                // Reap one operation / multiple operations.
-                // NOTE: One sqe can generate multiple cqes.
-                io_uring_for_each_cqe(&_underlying_uring, head, cqe) {
-                    done++;
+                constexpr auto mo = std::memory_order::relaxed;
+
+                // There may be a contention between concurrent run()s.
+                while(!io_uring_peek_cqe(&_underlying_uring, &cqe)) {
                     using uop = io_uring_exec_operation_base;
                     auto uring_op = std::bit_cast<uop*>(cqe->user_data);
-                    uring_op->vtab.complete(uring_op, cqe->res);
+                    // It won't change any other shared variable,
+                    // and reorder is ok because of data/control dependency,
+                    // so just use relaxed order.
+                    bool expected = false, desired = true;
+                    // NOTES:
+                    // * Not allowed to fail spuriously, use strong version.
+                    // * xchg should be more API-friendly than cmpxchg,
+                    //   but we need to consider performance on read-side failure.
+                    if(auto &seen = uring_op->seen;
+                       !seen.compare_exchange_strong(expected, desired, mo, mo))
+                    {
+                        continue;
+                    }
+                    // Cached before seen(), io_uring may overwrite this value.
+                    auto cqe_res = cqe->res;
+                    io_uring_cqe_seen(&_underlying_uring, cqe);
+                    done++;
+                    uring_op->vtab.complete(uring_op, cqe_res);
                 }
+            }
+
+            if constexpr (policy.realtime) {
+                // Avoid 0.
                 if(done) {
-                    io_uring_cq_advance(&_underlying_uring, done);
+                    constexpr auto acq_rel = std::memory_order::acq_rel;
+                    local_inflight = _inflight.fetch_sub(done, acq_rel);
                 }
+            } else if constexpr (policy.autoquit) {
+                plugged_done += done;
             }
 
             if constexpr (policy.weakly_parallel) {
@@ -202,30 +242,42 @@ struct io_uring_exec: immovable {
             }
 
             if constexpr (policy.autoquit) {
-                auto realtime_inflight = [&] {
-                    if constexpr (policy.realtime) {
-                        std::lock_guard _ {_submit_mutex};
-                        return _inflight;
+                if(any_progress) continue;
+                bool scheduled_synchronizable = (step % scheduled_sync_ratio == 0);
+                constexpr struct {
+                    struct {} forced;
+                    struct {} normal;
+                } mode;
+                auto synchronize = [&, synchronized = false](auto tag = {}) mutable {
+                    constexpr bool forced = requires { tag == mode.forced; };
+                    if constexpr (!forced) {
+                        if(std::exchange(synchronized, true)) return;
                     }
-                    return 0;
+                    constexpr auto mo = forced ?
+                          std::memory_order::acq_rel
+                        : std::memory_order::relaxed;
+                    if(auto delta = std::exchange(plugged_done, 0)) {
+                        local_inflight = _inflight.fetch_sub(delta, mo);
+                    } else {
+                        local_inflight = _inflight.load(mo);
+                    }
                 };
 
-                // Deferred process to minimize the lock acquisition.
-                auto deferred_inflight = [&] {
-                    if constexpr (not policy.submit && not policy.realtime) {
-                        if((step % sync_ratio) == 0) {
-                            std::lock_guard _ {_submit_mutex};
-                            return _inflight;
-                        }
-                    }
-                    return local_inflight;
-                };
-
-                local_inflight = deferred_inflight();
-                // NOTE:
-                // If `done` > 0, there should be a push to `_inflight` before `return`.
-                // But `any_progress` must be true in this case.
-                if(!any_progress && !local_inflight && !realtime_inflight()) {
+                // 1. On-demand synchronization.
+                if(!deferred_initialization) {
+                    deferred_initialization = true;
+                    synchronize(mode.normal);
+                }
+                // 2. Scheduled synchronization.
+                if(scheduled_synchronizable) {
+                    synchronize(mode.normal);
+                }
+                // 3. Best-effort synchronization before actual `return`.
+                if(local_inflight <= 0) {
+                    synchronize(mode.forced);
+                }
+                // 4. Finally...
+                if(local_inflight <= 0) {
                     return;
                 }
             }
@@ -251,7 +303,8 @@ struct io_uring_exec: immovable {
     }
 
     // See the comments on `coroutine.h` and `config.h`.
-    size_t /*_inaccurate*/ _inflight {};
+    // The `_inflight` value is estimated (or inaccurate).
+    std::atomic<ssize_t> /*_estimated*/_inflight {};
 
     task _head, *_tail{&_head};
     std::mutex _head_mutex, _tail_mutex;
@@ -275,6 +328,7 @@ struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
         if(auto sqe = io_uring_get_sqe(&uring->_underlying_uring)) [[likely]] {
             io_uring_sqe_set_data(sqe, static_cast<io_uring_exec_operation_base*>(this));
             std::apply(F, std::tuple_cat(std::tuple(sqe), std::move(args)));
+            uring->_inflight.fetch_add(1, std::memory_order::relaxed);
         } else {
             guard.unlock();
             // RETURN VALUE
