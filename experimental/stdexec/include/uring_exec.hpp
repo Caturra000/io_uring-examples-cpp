@@ -114,11 +114,22 @@ struct io_uring_exec: immovable {
 
         // Behavior details.
         bool busyloop {false};          // No yield.
-        bool quitable {false};          // `concurrent` runs infinitely by default.
+        bool autoquit {false};          // `concurrent` runs infinitely by default.
         bool lockless {false};          // (WIP) Some intrusive queues are within the same thread.
-        bool realtime {false};          // (WIP) No delayed process.
+        bool realtime {false};          // No deferred processing.
+        bool waitable {false};          // Submit and wait.
+        bool hookable {true};           // Always true beacause of per-object vtable.
     };
 
+    // Run with customizable policy.
+    // If you want to change a few options based on a default config.
+    // Try this:
+    // constexpr auto policy = [] {
+    //     auto policy = io_uring_exec::run_policy{};
+    //     policy.launch = false;
+    //     return policy;
+    // } ();
+    // uring.run<policy>();
     template <run_policy policy = {}>
     void run() {
         // Progress.
@@ -126,14 +137,12 @@ struct io_uring_exec: immovable {
         size_t submitted {};        // For `io_uring_submit`.
         size_t done {};             // For `io_uring_for_each_cqe`.
 
-        // (WIP)
-        // Delayed process to minimize the lock acquisition.
-        // Finally, we synchronize `_inflight` with `all_done`.
-        size_t all_done {};         // Push value (\sum `done`).
-        size_t local_inflight {};   // Pull value.
+        // Deferred processing.
+        size_t local_inflight {};
+        constexpr size_t sync_ratio = 8;
 
         // TODO: stop_token.
-        for(;;) {
+        for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
                 auto [first, last] = move_task_queue();
                 if(first) for(auto op = first;; op = op->next) {
@@ -146,8 +155,13 @@ struct io_uring_exec: immovable {
             // Need to push/pull (local_)inflight value if there is no submission policy.
             if constexpr (policy.submit) {
                 std::lock_guard guard {_submit_mutex};
-                submitted = io_uring_submit(&_underlying_uring);
-                _inflight += submitted;
+                if constexpr (policy.waitable) {
+                    // TODO: wait_{one|some|all}.
+                    submitted = io_uring_submit_and_wait(&_underlying_uring, 1);
+                } else {
+                    submitted = io_uring_submit(&_underlying_uring);
+                }
+                _inflight += submitted - /*last*/ done;
                 local_inflight = _inflight;
                 // When escaping from this scope, we can't access _inflight without mutex.
                 // Use local_inflight instead.
@@ -166,7 +180,6 @@ struct io_uring_exec: immovable {
                     uring_op->vtab.complete(uring_op, cqe->res);
                 }
                 if(done) {
-                    all_done += done;
                     io_uring_cq_advance(&_underlying_uring, done);
                 }
             }
@@ -184,12 +197,37 @@ struct io_uring_exec: immovable {
                 if(any_progress) return;
             }
 
-            if constexpr (!policy.busyloop) {
+            if constexpr (not policy.busyloop) {
                 if(any_progress) std::this_thread::yield();
             }
 
-            if constexpr (policy.quitable) {
-                if(!any_progress && !local_inflight) return;
+            if constexpr (policy.autoquit) {
+                auto realtime_inflight = [&] {
+                    if constexpr (policy.realtime) {
+                        std::lock_guard _ {_submit_mutex};
+                        return _inflight;
+                    }
+                    return 0;
+                };
+
+                // Deferred process to minimize the lock acquisition.
+                auto deferred_inflight = [&] {
+                    if constexpr (not policy.submit && not policy.realtime) {
+                        if((step % sync_ratio) == 0) {
+                            std::lock_guard _ {_submit_mutex};
+                            return _inflight;
+                        }
+                    }
+                    return local_inflight;
+                };
+
+                local_inflight = deferred_inflight();
+                // NOTE:
+                // If `done` > 0, there should be a push to `_inflight` before `return`.
+                // But `any_progress` must be true in this case.
+                if(!any_progress && !local_inflight && !realtime_inflight()) {
+                    return;
+                }
             }
         }
     }
