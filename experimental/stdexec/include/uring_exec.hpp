@@ -156,6 +156,16 @@ struct io_uring_exec: immovable {
         auto unplug_on_exit = std::unique_ptr<void, decltype(unplug)>
                                 {make_STL_happy, std::move(unplug)};
 
+        static_assert(
+            [](auto ...options) {
+                return (int{options} + ...) == 1;
+            } (policy.concurrent,
+               policy.weakly_parallel,
+               policy.weakly_concurrent),
+
+            "Small. Fast. Reliable. Choose any three."
+        );
+
         // TODO: stop_token.
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
