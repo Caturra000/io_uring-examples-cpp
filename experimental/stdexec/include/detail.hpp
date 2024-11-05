@@ -3,6 +3,7 @@
 #include <array>
 #include <tuple>
 #include <concepts>
+#include <ranges>
 
 namespace detail {
 
@@ -13,12 +14,19 @@ struct immovable {
 };
 
 struct submit_lock {
-    auto fastpath_guard(immovable &stable_obejct) {
-        auto by_value = std::bit_cast<std::ptrdiff_t>(&stable_obejct);
-        auto n_way_concurrency = by_value % std::size(_submit_mutexes);
-        return std::unique_lock{_submit_mutexes[n_way_concurrency]};
+    auto fastpath_guard(std::derived_from<immovable> auto &stable_object) {
+        using T = std::decay_t<decltype(stable_object)>;
+        auto to_value = std::bit_cast<std::uintptr_t, T*>;
+        auto no_align = [&](auto v) { return v / alignof(T); };
+        auto to_index = [&](auto v) { return v % n_way_concurrency; };
+        auto then = std::views::transform;
+        auto view = std::views::single(&stable_object)
+                  | then(to_value)
+                  | then(no_align)
+                  | then(to_index);
+        return std::unique_lock{_submit_mutexes[view.begin()[0]]};
     }
-    
+
     auto slowpath_guard() {
         return std::apply([](auto &&...mutexes) {
                             return std::scoped_lock{mutexes...};
@@ -26,7 +34,8 @@ struct submit_lock {
                           _submit_mutexes);
     }
 
-    std::array<std::mutex, 4> _submit_mutexes;
+    inline static constexpr size_t n_way_concurrency = 4;
+    std::array<std::mutex, n_way_concurrency> _submit_mutexes;
 };
 
 template <std::derived_from<immovable> T>
