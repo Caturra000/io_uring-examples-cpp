@@ -64,15 +64,40 @@ struct intrusive_queue {
     std::mutex _tail_mutex{};
 };
 
+struct you_are_a_vtable_signature {};
 
-// Per-object vtable for (receiver) type erasure.
+template <typename Signature>
+concept vtable_signature = requires {
+    typename Signature::sign_off;
+    requires std::is_same_v<typename Signature::sign_off,
+                            you_are_a_vtable_signature>;
+};
+
+// Make vtable composable.
 template <typename>
-struct make_vtable;
+struct add_complete_to_vtable;
+
+// Make vtable composable.
+template <typename>
+struct add_cancel_to_vtable;
 
 template <typename Ret, typename ...Args>
-struct make_vtable<Ret(Args...)> {
+struct add_complete_to_vtable<Ret(Args...)> {
+    using sign_off = you_are_a_vtable_signature;
     Ret (*complete)(Args...);
-    // Ret2 (*ready)(Args2...);
 };
+
+template <typename Ret, typename ...Args>
+struct add_cancel_to_vtable<Ret(Args...)> {
+    using sign_off = you_are_a_vtable_signature;
+    Ret (*cancel)(Args...);
+};
+
+// Per-object vtable for (receiver) type erasure.
+// Example:
+// using vtable = make_vtable<add_cancel_to_vtable<void()>,
+//                            add_complete_to_vtable<int(std::string)>>;
+template <vtable_signature ...Signatures>
+struct make_vtable: Signatures... {};
 
 } // namespace detail

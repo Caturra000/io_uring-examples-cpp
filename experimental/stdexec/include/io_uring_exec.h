@@ -27,7 +27,9 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
     // The `task` struct is queued by a user-space intrusive queue.
     // NOTE: The io_uring-specified task is queued by an interal ring of io_uring.
     struct task: immovable {
-        using vtable = detail::make_vtable<void(task*)>;
+        using vtable = detail::make_vtable<
+                        detail::add_complete_to_vtable<void(task*)>,
+                        detail::add_cancel_to_vtable  <void(task*)>>;
         vtable vtab;
         task *next {nullptr};
     };
@@ -44,10 +46,14 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
         }
 
         inline constexpr static vtable this_vtable {
-            .complete = [](task *_self) noexcept {
+            {.complete = [](task *_self) noexcept {
                 auto self = static_cast<operation*>(_self);
                 stdexec::set_value(std::move(self->receiver));
-            }
+            }},
+            {.cancel = [](task *_self) noexcept {
+                auto self = static_cast<operation*>(_self);
+                stdexec::set_stopped(std::move(self->receiver));
+            }}
         };
 
         Receiver receiver;
@@ -80,7 +86,10 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
     // External structured callbacks support.
     struct io_uring_exec_operation_base: immovable {
         using result_t = decltype(std::declval<io_uring_cqe>().res);
-        using vtable = detail::make_vtable<void(io_uring_exec_operation_base*, result_t)>;
+        using _self_t = io_uring_exec_operation_base;
+        using vtable = detail::make_vtable<
+                        detail::add_complete_to_vtable<void(_self_t*, result_t)>,
+                        detail::add_cancel_to_vtable  <void(_self_t*)>>;
         vtable vtab;
         std::atomic<bool> seen {false};
     };
@@ -129,7 +138,8 @@ struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
     void start() noexcept {
         auto guard = uring->_submit_lock.fastpath_guard(*this);
         if(auto sqe = io_uring_get_sqe(&uring->_underlying_uring)) [[likely]] {
-            io_uring_sqe_set_data(sqe, static_cast<io_uring_exec_operation_base*>(this));
+            using op_base = io_uring_exec_operation_base;
+            io_uring_sqe_set_data(sqe, static_cast<op_base*>(this));
             std::apply(F, std::tuple_cat(std::tuple(sqe), std::move(args)));
             uring->_inflight.fetch_add(1, std::memory_order::relaxed);
         } else {
@@ -146,7 +156,7 @@ struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
     }
 
     inline constexpr static vtable this_vtable {
-        .complete = [](auto *_self, result_t cqe_res) noexcept {
+        {.complete = [](auto *_self, result_t cqe_res) noexcept {
             auto self = static_cast<io_uring_exec_operation*>(_self);
 
             constexpr auto is_timer = [] {
@@ -175,7 +185,11 @@ struct io_uring_exec_operation: io_uring_exec::io_uring_exec_operation_base {
                             std::system_error(-cqe_res, std::system_category()));
                 stdexec::set_error(std::move(self->receiver), std::move(error));
             }
-        }
+        }},
+        {.cancel = [](auto *_self) noexcept {
+            auto self = static_cast<io_uring_exec_operation*>(_self);
+            stdexec::set_stopped(std::move(self->receiver));
+        }}
     };
 
     Receiver receiver;
