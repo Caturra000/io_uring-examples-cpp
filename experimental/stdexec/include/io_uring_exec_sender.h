@@ -7,8 +7,7 @@
 #include <liburing.h>
 #include <stdexec/execution.hpp>
 #include "io_uring_exec.h"
-
-using io_uring_exec_operation_base = io_uring_exec::io_uring_exec_operation_base;
+#include "io_uring_exec_operation.h"
 
 template <auto io_uring_prep_invocable, typename ...Args>
 struct io_uring_exec_sender {

@@ -65,7 +65,7 @@ struct io_uring_exec_run {
         ssize_t done {};            // For `io_uring_for_each_cqe`.
 
         // Deferred processing.
-        bool deferred_initialization {};
+        bool deferred_initialized {};
         ssize_t local_inflight {};
         ssize_t plugged_done {};
         constexpr size_t scheduled_sync_ratio = 32;
@@ -190,8 +190,8 @@ struct io_uring_exec_run {
                 };
 
                 // 1. On-demand synchronization.
-                if(!deferred_initialization) {
-                    deferred_initialization = true;
+                if(!deferred_initialized) {
+                    deferred_initialized = true;
                     synchronize(mode.normal);
                 }
                 // 2. Scheduled synchronization.

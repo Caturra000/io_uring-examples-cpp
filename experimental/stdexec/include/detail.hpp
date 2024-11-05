@@ -14,9 +14,9 @@ struct immovable {
 };
 
 struct submit_lock {
-    auto fastpath_guard(std::derived_from<immovable> auto &stable_object) {
+    auto fastpath_guard(const std::derived_from<immovable> auto &stable_object) {
         using T = std::decay_t<decltype(stable_object)>;
-        auto to_value = std::bit_cast<std::uintptr_t, T*>;
+        auto to_value = std::bit_cast<std::uintptr_t, const T*>;
         auto no_align = [&](auto v) { return v / alignof(T); };
         auto to_index = [&](auto v) { return v % n_way_concurrency; };
         auto then = std::views::transform;
@@ -24,14 +24,14 @@ struct submit_lock {
                   | then(to_value)
                   | then(no_align)
                   | then(to_index);
-        return std::unique_lock{_submit_mutexes[view.begin()[0]]};
+        return std::unique_lock{_submit_mutexes[view[0]]};
     }
 
     auto slowpath_guard() {
-        return std::apply([](auto &&...mutexes) {
-                            return std::scoped_lock{mutexes...};
-                          },
-                          _submit_mutexes);
+        auto make_scoped_lock = [](auto &&...mutexes) {
+            return std::scoped_lock{mutexes...};
+        };
+        return std::apply(make_scoped_lock, _submit_mutexes);
     }
 
     inline static constexpr size_t n_way_concurrency = 4;
