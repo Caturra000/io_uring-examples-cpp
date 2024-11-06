@@ -10,7 +10,7 @@
 #include <system_error>
 #include <ranges>
 
-// CRTP for `io_uring_exec::run()`.
+// CRTP for `io_uring_exec::run()` and `io_uring_exec::final_run()`.
 template <typename Exec_crtp_derived>
 struct io_uring_exec_run {
     struct run_policy {
@@ -37,10 +37,13 @@ struct io_uring_exec_run {
         bool realtime {false};          // No deferred processing.
         bool waitable {false};          // Submit and wait.
         bool hookable {true};           // Always true beacause of per-object vtable.
+
+        bool terminal {false};          // For stopped context.
     };
 
-    template <run_policy policy = {}>
-    void run() {
+    // TODO: stdexec::inplace_stop_token
+    template <run_policy policy = {}, typename E_stop_token = std::stop_token>
+    void run(E_stop_token external_stop_token = {}) {
         static_assert(
             [](auto ...options) {
                 return (int{options} + ...) == 1;
@@ -53,11 +56,11 @@ struct io_uring_exec_run {
 
         using task = Exec_crtp_derived::task;
         using io_uring_exec_operation_base = Exec_crtp_derived::io_uring_exec_operation_base;
-        auto that = [this] { return static_cast<Exec_crtp_derived*>(this); } ();
-        auto &_inflight         = that->_inflight;
-        auto &_intrusive_queue  = that->_intrusive_queue;
-        auto &_submit_lock      = that->_submit_lock;
-        auto &_underlying_uring = that->_underlying_uring;
+        auto &_inflight         = that()->_inflight;
+        auto &_running_run      = that()->_running_run;
+        auto &_intrusive_queue  = that()->_intrusive_queue;
+        auto &_submit_lock      = that()->_submit_lock;
+        auto &_underlying_uring = that()->_underlying_uring;
 
         // Progress.
         task *first_task {};        // For empty queue detection.
@@ -70,23 +73,41 @@ struct io_uring_exec_run {
         ssize_t plugged_done {};
         constexpr size_t scheduled_sync_ratio = 32;
 
-        auto unplug = [&](...) {
+        auto on_exit = [](auto f) {
+            auto _0x1 = std::uintptr_t {0x1};
+            // reinterpret_cast is not a constexpr.
+            auto make_STL_happy = reinterpret_cast<void*>(_0x1);
+            auto make_dtor_happy = [f = std::move(f)](...) { f(); };
+            using Defer = std::unique_ptr<void, decltype(make_dtor_happy)>;
+            return Defer{make_STL_happy, std::move(make_dtor_happy)};
+        };
+
+        auto unplug = on_exit([&] {
             if constexpr (policy.realtime) return;
             if(plugged_done == 0) return;
-            _inflight.fetch_sub(plugged_done);
-        };
-        auto make_STL_happy = reinterpret_cast<void*>(0x1);
-        auto unplug_on_exit = std::unique_ptr<void, decltype(unplug)>
-                                {make_STL_happy, std::move(unplug)};
+            // We don't need an accurate execution point.
+            _inflight.fetch_sub(plugged_done, std::memory_order::relaxed);
+        });
 
-        // TODO: stop_token.
+        // We need a latch effect here.
+        _running_run.fetch_add(1, std::memory_order::acq_rel);
+        auto countdown = on_exit([&] {
+            _running_run.fetch_sub(1, std::memory_order::acq_rel);
+            // TODO: Notify for a rare case?
+        });
+
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
                 // TODO: Optimzied to a lockfree version?
                 // But the move operation is just trying to lock once...
                 auto [first, last] = _intrusive_queue.move_queue();
                 if(first) for(auto op = first;; op = op->next) {
-                    op->vtab.complete(op);
+                    if constexpr (policy.terminal) {
+                        op->vtab.cancel(op);
+                    } else {
+                        op->vtab.complete(op);
+                    }
+
                     if(op == last) break;
                 }
                 first_task = first;
@@ -117,6 +138,13 @@ struct io_uring_exec_run {
 
                 // There may be a contention between concurrent run()s.
                 while(!io_uring_peek_cqe(&_underlying_uring, &cqe)) {
+                    if constexpr (policy.terminal) {
+                        if(that() == std::bit_cast<decltype(that())>(cqe->user_data)) {
+                            io_uring_cqe_seen(&_underlying_uring, cqe);
+                            continue;
+                        }
+                    }
+
                     using uop = io_uring_exec_operation_base;
                     auto uring_op = std::bit_cast<uop*>(cqe->user_data);
                     // It won't change any other shared variable,
@@ -161,6 +189,15 @@ struct io_uring_exec_run {
 
             if constexpr (policy.weakly_concurrent) {
                 if(any_progress) return;
+            }
+
+            // Per-run() stop token.
+            if(external_stop_token.stop_requested()) {
+                return;
+            }
+
+            if(that()->stop_requested()) {
+                return;
             }
 
             if constexpr (not policy.busyloop) {
@@ -208,5 +245,40 @@ struct io_uring_exec_run {
                 }
             }
         }
+    }
+
+    // Clear all the pending opeartions.
+    void final_run() {
+        auto &_running_run      = that()->_running_run;
+        auto &_underlying_uring = that()->_underlying_uring;
+
+        that()->request_stop();
+        // NOTE: (stop+countdown) is not an atomic transaction.
+        while(_running_run.load(std::memory_order::acquire)) {
+            // TODO: atomic.wait().
+            std::this_thread::yield();
+        }
+
+        // Flush, and ensure that the cancel-sqe must be allocated successfully.
+        io_uring_submit(&_underlying_uring);
+        auto sqe = io_uring_get_sqe(&_underlying_uring);
+        io_uring_sqe_set_data(sqe, that() /* special identifier */);
+        io_uring_prep_cancel(sqe, {}, IORING_ASYNC_CANCEL_ANY);
+
+        constexpr auto final_policy = [] {
+            auto policy = run_policy{};
+            policy.terminal = true;
+            policy.concurrent = false;
+            policy.weakly_parallel = true;
+            return policy;
+        } ();
+
+        // Cancel!
+        run<final_policy>();
+    }
+
+private:
+    constexpr auto that() -> Exec_crtp_derived* {
+        return static_cast<Exec_crtp_derived*>(this);
     }
 };

@@ -12,7 +12,10 @@
 
 using immovable = detail::immovable;
 
-struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
+struct io_uring_exec: immovable,
+                      io_uring_exec_run<io_uring_exec>,
+                      private std::stop_source
+{
     io_uring_exec(size_t uring_entries, int uring_flags = 0): _intrusive_queue{._head{{}, {}}} {
         if(int err = io_uring_queue_init(uring_entries, &_underlying_uring, uring_flags)) {
             throw std::system_error(-err, std::system_category());
@@ -30,6 +33,7 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
     {}
 
     ~io_uring_exec() {
+        final_run();
         io_uring_queue_exit(&_underlying_uring);
     }
 
@@ -126,9 +130,17 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
     using io_uring_exec_run::run_policy;
     using io_uring_exec_run::run;
 
+    using std::stop_source::request_stop;
+    using std::stop_source::stop_requested;
+    using std::stop_source::stop_possible;
+    auto get_token() = delete;
+    auto get_stop_token() const noexcept { return std::stop_source::get_token(); }
+
     // See the comments on `coroutine.h` and `config.h`.
     // The `_inflight` value is estimated (or inaccurate).
     std::atomic<ssize_t> /*_estimated*/_inflight {};
+    // A simple reference counter for run().
+    std::atomic<size_t> _running_run {};
     intrusive_task_queue _intrusive_queue;
     detail::multi_lock<std::mutex> _submit_lock;
     io_uring _underlying_uring;
