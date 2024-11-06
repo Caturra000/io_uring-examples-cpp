@@ -130,6 +130,6 @@ struct io_uring_exec: immovable, io_uring_exec_run<io_uring_exec> {
     // The `_inflight` value is estimated (or inaccurate).
     std::atomic<ssize_t> /*_estimated*/_inflight {};
     intrusive_task_queue _intrusive_queue;
-    detail::submit_lock _submit_lock;
+    detail::multi_lock<std::mutex> _submit_lock;
     io_uring _underlying_uring;
 };

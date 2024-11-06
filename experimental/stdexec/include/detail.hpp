@@ -13,29 +13,30 @@ struct immovable {
     immovable(immovable &&) = delete;
 };
 
-struct submit_lock {
+template <typename Mutex = std::mutex,
+          size_t N_way_concurrency = 4>
+struct multi_lock {
     auto fastpath_guard(const std::derived_from<immovable> auto &stable_object) {
         using T = std::decay_t<decltype(stable_object)>;
         auto to_value = std::bit_cast<std::uintptr_t, const T*>;
         auto no_align = [&](auto v) { return v / alignof(T); };
-        auto to_index = [&](auto v) { return v % n_way_concurrency; };
+        auto to_index = [&](auto v) { return v % N_way_concurrency; };
         auto then = std::views::transform;
         auto view = std::views::single(&stable_object)
                   | then(to_value)
                   | then(no_align)
                   | then(to_index);
-        return std::unique_lock{_submit_mutexes[view[0]]};
+        return std::unique_lock{_mutexes[view[0]]};
     }
 
     auto slowpath_guard() {
         auto make_scoped_lock = [](auto &&...mutexes) {
             return std::scoped_lock{mutexes...};
         };
-        return std::apply(make_scoped_lock, _submit_mutexes);
+        return std::apply(make_scoped_lock, _mutexes);
     }
 
-    inline static constexpr size_t n_way_concurrency = 4;
-    std::array<std::mutex, n_way_concurrency> _submit_mutexes;
+    std::array<Mutex, N_way_concurrency> _mutexes;
 };
 
 template <std::derived_from<immovable> T>
