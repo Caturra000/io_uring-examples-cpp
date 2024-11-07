@@ -43,26 +43,20 @@ template <std::derived_from<immovable> T>
     requires requires(T *t) { t->next; }
 struct intrusive_queue {
     void push(T *op) noexcept {
-        std::lock_guard _{_tail_mutex};
-        std::unique_lock may_own {_head_mutex, std::defer_lock};
-        if(_tail == &_head) may_own.lock();
+        std::lock_guard _ {_mutex};
         _tail = _tail->next = op;
     }
 
     // No pop(), just move.
     std::pair<T*, T*> move_queue() noexcept {
-        // Don't use std::scoped_lock;
-        // its ordering algorithm is implementation-defined.
-        std::lock_guard _1 {_tail_mutex};
-        std::lock_guard _2 {_head_mutex};
+        std::lock_guard _ {_mutex};
         auto first = std::exchange(_head.next, nullptr);
         auto last = std::exchange(_tail, &_head);
         return {first, last};
     }
 
     T _head, *_tail{&_head};
-    std::mutex _head_mutex{};
-    std::mutex _tail_mutex{};
+    std::mutex _mutex{};
 };
 
 struct you_are_a_vtable_signature {};
