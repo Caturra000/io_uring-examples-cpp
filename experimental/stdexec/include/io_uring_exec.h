@@ -49,8 +49,8 @@ struct io_uring_exec: immovable,
         using vtable = detail::make_vtable<
                         detail::add_complete_to_vtable<void(task*)>,
                         detail::add_cancel_to_vtable  <void(task*)>>;
-        vtable vtab;
         task(vtable vtab) noexcept: vtab(vtab) {}
+        vtable vtab;
     };
 
     using intrusive_task_queue = detail::intrusive_queue<task, &task::_i_next>;
