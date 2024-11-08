@@ -47,12 +47,14 @@ struct intrusive_queue {
         _tail = _tail->next = op;
     }
 
-    // No pop(), just move.
-    std::pair<T*, T*> move_queue() noexcept {
+    T* pop() noexcept {
         std::lock_guard _ {_mutex};
-        auto first = std::exchange(_head.next, nullptr);
-        auto last = std::exchange(_tail, &_head);
-        return {first, last};
+        if(auto node = _head.next) {
+            _head.next = node->next;
+            if(_tail == node) _tail = &_head;
+            return node;
+        }
+        return {};
     }
 
     T _head, *_tail{&_head};

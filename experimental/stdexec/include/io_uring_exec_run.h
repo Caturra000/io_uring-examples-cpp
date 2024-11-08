@@ -98,19 +98,14 @@ struct io_uring_exec_run {
 
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
-                // TODO: Optimzied to a lockfree version?
-                // But the move operation is just trying to lock once...
-                auto [first, last] = _intrusive_queue.move_queue();
-                if(first) for(auto op = first;; op = op->next) {
+                auto op = first_task = _intrusive_queue.pop();
+                for(; op; op = _intrusive_queue.pop()) {
                     if constexpr (policy.terminal) {
                         op->vtab.cancel(op);
                     } else {
                         op->vtab.complete(op);
                     }
-
-                    if(op == last) break;
                 }
-                first_task = first;
             }
 
             // `_inflight` is only needed when `autoquit` is enabled.
