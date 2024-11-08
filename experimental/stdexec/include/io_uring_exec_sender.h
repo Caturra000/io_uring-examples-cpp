@@ -1,4 +1,7 @@
 #pragma once
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #include <cstring>
 #include <chrono>
 #include <mutex>
@@ -56,6 +59,16 @@ auto async_read(io_uring_exec::scheduler s, int fd, void *buf, size_t n, uint64_
 stdexec::sender
 auto async_write(io_uring_exec::scheduler s, int fd, const void *buf, size_t n, uint64_t offset = 0) noexcept {
     return make_uring_sender<io_uring_prep_write>(s, fd, buf, n, offset);
+}
+
+stdexec::sender
+auto async_close(io_uring_exec::scheduler s, int fd) noexcept {
+    return make_uring_sender<io_uring_prep_close>(s, fd);
+}
+
+stdexec::sender
+auto async_accept(io_uring_exec::scheduler s,int fd, int flags) noexcept {
+    return make_uring_sender<io_uring_prep_accept>(s, fd, nullptr, nullptr, flags);
 }
 
 stdexec::sender
