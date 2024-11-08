@@ -16,7 +16,7 @@ struct io_uring_exec: immovable,
                       io_uring_exec_run<io_uring_exec>,
                       private std::stop_source
 {
-    io_uring_exec(size_t uring_entries, int uring_flags = 0): _intrusive_queue{._head{{}, {}}} {
+    io_uring_exec(size_t uring_entries, int uring_flags = 0) {
         if(int err = io_uring_queue_init(uring_entries, &_underlying_uring, uring_flags)) {
             throw std::system_error(-err, std::system_category());
         }
@@ -37,18 +37,23 @@ struct io_uring_exec: immovable,
         io_uring_queue_exit(&_underlying_uring);
     }
 
+    // Avoid requiring a default constructor in derived classes.
+    struct intrusive_node {
+        intrusive_node *_i_next {nullptr};
+    };
+
     // All the tasks are asynchronous.
     // The `task` struct is queued by a user-space intrusive queue.
     // NOTE: The io_uring-specified task is queued by an interal ring of io_uring.
-    struct task: immovable {
+    struct task: immovable, intrusive_node {
         using vtable = detail::make_vtable<
                         detail::add_complete_to_vtable<void(task*)>,
                         detail::add_cancel_to_vtable  <void(task*)>>;
         vtable vtab;
-        task *next {nullptr};
+        task(vtable vtab) noexcept: vtab(vtab) {}
     };
 
-    using intrusive_task_queue = detail::intrusive_queue<task>;
+    using intrusive_task_queue = detail::intrusive_queue<task, &task::_i_next>;
 
     // Required by stdexec.
     template <stdexec::receiver Receiver>
@@ -83,7 +88,7 @@ struct io_uring_exec: immovable,
                                         stdexec::set_stopped_t()>;
         template <stdexec::receiver Receiver>
         operation<Receiver> connect(Receiver receiver) noexcept {
-            return {{{}, operation<Receiver>::this_vtable}, std::move(receiver), uring};
+            return {{operation<Receiver>::this_vtable}, std::move(receiver), uring};
         }
         io_uring_exec *uring;
     };

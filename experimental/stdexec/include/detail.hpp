@@ -39,26 +39,36 @@ struct multi_lock {
     std::array<Mutex, N_way_concurrency> _mutexes;
 };
 
-template <std::derived_from<immovable> T>
-    requires requires(T *t) { t->next; }
-struct intrusive_queue {
+template <typename T, typename Node>
+concept intrusive =
+    std::derived_from<T, immovable>
+ && std::derived_from<T, Node>;
+
+template <typename, auto>
+struct intrusive_queue;
+
+template <typename Node,
+          intrusive<Node> T,
+          Node* Node::*Next>
+    requires requires(T t) { t.*Next; }
+struct intrusive_queue<T, Next> {
     void push(T *op) noexcept {
         std::lock_guard _ {_mutex};
-        _tail = _tail->next = op;
+        _tail = _tail->*Next = op;
     }
 
     T* pop() noexcept {
         std::lock_guard _ {_mutex};
-        if(auto node = _head.next) {
-            _head.next = node->next;
+        if(auto node = _head.*Next) {
+            _head.*Next = node->*Next;
             if(_tail == node) _tail = &_head;
-            return node;
+            return static_cast<T*>(node);
         }
         return {};
     }
 
-    T _head, *_tail{&_head};
-    std::mutex _mutex{};
+    Node _head, *_tail{&_head};
+    std::mutex _mutex;
 };
 
 struct you_are_a_vtable_signature {};
