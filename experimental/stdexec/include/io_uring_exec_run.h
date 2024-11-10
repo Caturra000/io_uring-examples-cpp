@@ -33,7 +33,6 @@ struct io_uring_exec_run {
         // Behavior details.
         bool busyloop {false};          // No yield.
         bool autoquit {false};          // `concurrent` runs infinitely by default.
-        bool lockless {false};          // (WIP) Some intrusive queues are within the same thread.
         bool realtime {false};          // No deferred processing.
         bool waitable {false};          // Submit and wait.
         bool hookable {true};           // Always true beacause of per-object vtable.
@@ -98,12 +97,17 @@ struct io_uring_exec_run {
 
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
-                auto op = first_task = _intrusive_queue.pop();
-                for(; op; op = _intrusive_queue.pop()) {
+                auto &q = _intrusive_queue;
+                auto op = first_task = q.move_all();
+                while(op) {
+                    // NOTE:
+                    // We need to get the `next(op)` first.
+                    // Because `op` will be destroyed after complete/cancel().
+                    auto o = std::exchange(op, q.next(op));
                     if constexpr (policy.terminal) {
-                        op->vtab.cancel(op);
+                        o->vtab.cancel(o);
                     } else {
-                        op->vtab.complete(op);
+                        o->vtab.complete(o);
                     }
                 }
             }

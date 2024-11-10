@@ -52,23 +52,29 @@ template <typename Node,
           Node* Node::*Next>
     requires requires(T t) { t.*Next; }
 struct intrusive_queue<T, Next> {
+    inline constexpr static auto read_mo = std::memory_order::relaxed;
+    inline constexpr static auto write_mo = std::memory_order::acq_rel;
+
     void push(T *op) noexcept {
-        std::lock_guard _ {_mutex};
-        _tail = _tail->*Next = op;
+        auto node = _head.load(read_mo);
+        do {
+            op->*Next = node;
+        } while(!_head.compare_exchange_weak(node, op, write_mo, read_mo));
     }
 
-    T* pop() noexcept {
-        std::lock_guard _ {_mutex};
-        if(auto node = _head.*Next) {
-            _head.*Next = node->*Next;
-            if(_tail == node) _tail = &_head;
-            return static_cast<T*>(node);
-        }
-        return {};
+    T* move_all() noexcept {
+        auto node = _head.load(read_mo);
+        while(!_head.compare_exchange_weak(node, nullptr, write_mo, read_mo));
+        return static_cast<T*>(node);
     }
 
-    Node _head, *_tail{&_head};
-    std::mutex _mutex;
+    // A unified interface to get the next element.
+    inline static T* next(intrusive<Node> auto *node_or_element) noexcept {
+        return static_cast<T*>(node_or_element->*Next);
+    }
+
+private:
+    std::atomic<Node*> _head {nullptr};
 };
 
 struct you_are_a_vtable_signature {};
