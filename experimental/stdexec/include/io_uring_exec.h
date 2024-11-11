@@ -10,11 +10,11 @@
 #include "detail.hpp"
 #include "io_uring_exec_run.h"
 
-using immovable = detail::immovable;
+using detail::immovable;
 
-struct io_uring_exec: immovable,
-                      io_uring_exec_run<io_uring_exec>,
-                      private std::stop_source
+struct io_uring_exec: public immovable,
+                      private io_uring_exec_run<io_uring_exec>,
+                      private detail::unified_stop_source<stdexec::inplace_stop_source>
 {
     io_uring_exec(size_t uring_entries, int uring_flags = 0) {
         if(int err = io_uring_queue_init(uring_entries, &_underlying_uring, uring_flags)) {
@@ -66,8 +66,15 @@ struct io_uring_exec: immovable,
 
         inline constexpr static vtable this_vtable {
             {.complete = [](task *_self) noexcept {
-                auto self = static_cast<operation*>(_self);
-                stdexec::set_value(std::move(self->receiver));
+                auto &receiver = static_cast<operation*>(_self)->receiver;
+                auto stop_token = stdexec::get_stop_token(stdexec::get_env(receiver));
+                if constexpr (stdexec::unstoppable_token<decltype(stop_token)>) {
+                    stdexec::set_value(std::move(receiver));
+                } else {
+                    stop_token.stop_requested() ?
+                        stdexec::set_stopped(std::move(receiver))
+                      : stdexec::set_value(std::move(receiver));
+                }
             }},
             {.cancel = [](task *_self) noexcept {
                 auto self = static_cast<operation*>(_self);
@@ -113,6 +120,9 @@ struct io_uring_exec: immovable,
         std::atomic<bool> seen {false};
     };
 
+    // For CRTP.
+    friend io_uring_exec_run<io_uring_exec>;
+
     // Run with customizable policy.
     //
     // If you want to change a few options based on a default config, try this way:
@@ -135,11 +145,12 @@ struct io_uring_exec: immovable,
     using io_uring_exec_run::run_policy;
     using io_uring_exec_run::run;
 
-    using std::stop_source::request_stop;
-    using std::stop_source::stop_requested;
-    using std::stop_source::stop_possible;
+    using stop_source_type::underlying_stop_source_type;
+    using stop_source_type::request_stop;
+    using stop_source_type::stop_requested;
+    using stop_source_type::stop_possible;
+    using stop_source_type::get_stop_token;
     auto get_token() = delete;
-    auto get_stop_token() const noexcept { return std::stop_source::get_token(); }
 
     // See the comments on `coroutine.h` and `config.h`.
     // The `_inflight` value is estimated (or inaccurate).

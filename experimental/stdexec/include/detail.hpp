@@ -113,4 +113,36 @@ struct add_cancel_to_vtable<Ret(Args...)> {
 template <vtable_signature ...Signatures>
 struct make_vtable: Signatures... {};
 
+// Make different stop sources more user-facing.
+template <typename> struct unified_stop_source;
+using std_stop_source     = unified_stop_source<std::stop_source>;
+using stdexec_stop_source = unified_stop_source<stdexec::inplace_stop_source>;
+
+template <typename self_t, typename stop_source_impl>
+struct unified_stop_source_base: protected stop_source_impl {
+    using stop_source_type = self_t;
+    using underlying_stop_source_type = stop_source_impl;
+};
+
+template <>
+struct unified_stop_source<std::stop_source>
+: protected unified_stop_source_base<std_stop_source,
+                                     std::stop_source> {
+    using underlying_stop_source_type::request_stop;
+    using underlying_stop_source_type::stop_requested;
+    using underlying_stop_source_type::stop_possible;
+    auto get_stop_token() const noexcept { return underlying_stop_source_type::get_token(); }
+};
+
+template <>
+struct unified_stop_source<stdexec::inplace_stop_source>
+: protected unified_stop_source_base<stdexec_stop_source,
+                                     stdexec::inplace_stop_source> {
+    using underlying_stop_source_type::request_stop;
+    using underlying_stop_source_type::stop_requested;
+    // Associated stop-state is always available in our case.
+    constexpr auto stop_possible() const noexcept { return true; }
+    auto get_stop_token() const noexcept { return underlying_stop_source_type::get_token(); }
+};
+
 } // namespace detail
