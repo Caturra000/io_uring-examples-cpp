@@ -9,6 +9,7 @@
 #include <utility>
 #include <system_error>
 #include <ranges>
+#include <stdexec/execution.hpp>
 
 // CRTP for `io_uring_exec::run()` and `io_uring_exec::final_run()`.
 template <typename Exec_crtp_derived>
@@ -40,9 +41,10 @@ struct io_uring_exec_run {
         bool terminal {false};          // For stopped context.
     };
 
-    // TODO: stdexec::inplace_stop_token
-    template <run_policy policy = {}, typename E_stop_token = std::stop_token>
-    void run(E_stop_token external_stop_token = {}) {
+    template <run_policy policy = {},
+              // Compatible with std::jthread and std::stop_token.
+              typename any_stop_token_t = stdexec::never_stop_token>
+    void run(any_stop_token_t external_stop_token = {}) {
         static_assert(
             [](auto ...options) {
                 return (int{options} + ...) == 1;
