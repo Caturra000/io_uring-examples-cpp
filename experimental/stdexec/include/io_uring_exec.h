@@ -67,14 +67,16 @@ struct io_uring_exec: public immovable,
         inline constexpr static vtable this_vtable {
             {.complete = [](task *_self) noexcept {
                 auto &receiver = static_cast<operation*>(_self)->receiver;
-                auto stop_token = stdexec::get_stop_token(stdexec::get_env(receiver));
-                if constexpr (stdexec::unstoppable_token<decltype(stop_token)>) {
+                using env_type = stdexec::env_of_t<Receiver>;
+                using stop_token_type = stdexec::stop_token_of_t<env_type>;
+                if constexpr (stdexec::unstoppable_token<stop_token_type>) {
                     stdexec::set_value(std::move(receiver));
-                } else {
-                    stop_token.stop_requested() ?
-                        stdexec::set_stopped(std::move(receiver))
-                      : stdexec::set_value(std::move(receiver));
+                    return;
                 }
+                auto stop_token = stdexec::get_stop_token(stdexec::get_env(receiver));
+                stop_token.stop_requested() ?
+                    stdexec::set_stopped(std::move(receiver))
+                    : stdexec::set_value(std::move(receiver));
             }},
             {.cancel = [](task *_self) noexcept {
                 auto self = static_cast<operation*>(_self);
