@@ -100,18 +100,22 @@ struct io_uring_exec_run {
         for(auto step : std::views::iota(1 /* Avoid pulling immediately */)) {
             if constexpr (policy.launch) {
                 auto &q = _intrusive_queue;
-                auto op = first_task = q.move_all();
-                while(op) {
-                    // NOTE:
-                    // We need to get the `next(op)` first.
-                    // Because `op` will be destroyed after complete/cancel().
-                    auto o = std::exchange(op, q.next(op));
+                auto op = q.move_all();
+                // NOTE:
+                // We need to get the `next(op)` first.
+                // Because `op` will be destroyed after complete/cancel().
+                auto safe_for_each = [&q, op](auto &&f) mutable {
+                    // It won't modify the outer `op`.
+                    for(; op; f(std::exchange(op, q.next(op))));
+                };
+                safe_for_each([](auto op) {
                     if constexpr (policy.terminal) {
-                        o->vtab.cancel(o);
+                        op->vtab.cancel(op);
                     } else {
-                        o->vtab.complete(o);
+                        op->vtab.complete(op);
                     }
-                }
+                });
+                first_task = op;
             }
 
             // `_inflight` is only needed when `autoquit` is enabled.
