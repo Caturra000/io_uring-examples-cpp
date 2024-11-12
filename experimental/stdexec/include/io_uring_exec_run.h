@@ -37,6 +37,7 @@ struct io_uring_exec_run {
         bool realtime {false};          // No deferred processing.
         bool waitable {false};          // Submit and wait.
         bool hookable {true};           // Always true beacause of per-object vtable.
+        bool detached {false};          // Ignore stop requests from `io_uring_exec`.
 
         bool terminal {false};          // For stopped context.
     };
@@ -197,12 +198,20 @@ struct io_uring_exec_run {
             }
 
             // Per-run() stop token.
+            //
+            // We use `stdexec::never_stop_token` by default.
+            // Its `stop_requested()` returns false in a constexpr way.
+            // So we don't need to add another detached policy here.
             if(external_stop_token.stop_requested()) {
                 return;
             }
 
-            if(that()->stop_requested()) {
-                return;
+            // Ignore the context's stop request can help reduce at least one atomic operation.
+            // This might be useful for some network I/O patterns.
+            if constexpr (not policy.detached) {
+                if(that()->stop_requested()) {
+                    return;
+                }
             }
 
             if constexpr (not policy.busyloop) {
