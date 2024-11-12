@@ -144,15 +144,16 @@ struct io_uring_exec_run {
 
                 // There may be a contention between concurrent run()s.
                 while(!io_uring_peek_cqe(&_underlying_uring, &cqe)) {
+                    auto user_data = io_uring_cqe_get_data(cqe);
                     if constexpr (policy.terminal) {
-                        if(that() == std::bit_cast<decltype(that())>(cqe->user_data)) {
+                        if(test_terminal_command(user_data)) {
                             io_uring_cqe_seen(&_underlying_uring, cqe);
                             continue;
                         }
                     }
 
                     using uop = io_uring_exec_operation_base;
-                    auto uring_op = std::bit_cast<uop*>(cqe->user_data);
+                    auto uring_op = std::bit_cast<uop*>(user_data);
                     // It won't change any other shared variable,
                     // and reorder is ok because of data/control dependency,
                     // so just use relaxed order.
@@ -276,7 +277,7 @@ struct io_uring_exec_run {
         // Flush, and ensure that the cancel-sqe must be allocated successfully.
         io_uring_submit(&_underlying_uring);
         auto sqe = io_uring_get_sqe(&_underlying_uring);
-        io_uring_sqe_set_data(sqe, that() /* special identifier */);
+        io_uring_sqe_set_data(sqe, make_terminal_command());
         io_uring_prep_cancel(sqe, {}, IORING_ASYNC_CANCEL_ANY);
 
         constexpr auto final_policy = [] {
@@ -292,7 +293,25 @@ struct io_uring_exec_run {
     }
 
 private:
-    constexpr auto that() -> Exec_crtp_derived* {
+    constexpr auto that() noexcept -> Exec_crtp_derived* {
         return static_cast<Exec_crtp_derived*>(this);
+    }
+
+    // liburing has different types between cqe->`user_data` and set_data[64](`user_data`).
+    // Don't know why.
+    using unified_user_data_type = decltype(
+        []<typename R, typename T>(R(io_uring_sqe*, T)) {
+            return T{};
+        } (io_uring_sqe_set_data));
+
+    constexpr auto make_terminal_command() noexcept {
+        // Impossible address for Linux user space.
+        auto impossible = std::numeric_limits<std::uintptr_t>::max();
+        // Don't care about whether it is a value or a pointer.
+        return std::bit_cast<unified_user_data_type>(impossible);
+    }
+
+    constexpr auto test_terminal_command(unified_user_data_type user_data) noexcept {
+        return make_terminal_command() == user_data;
     }
 };
