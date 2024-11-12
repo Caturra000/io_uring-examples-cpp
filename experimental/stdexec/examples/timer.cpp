@@ -15,7 +15,7 @@ auto print_global_clock = [init = std::chrono::steady_clock::now()] {
 
 int main() {
     io_uring_exec uring(512);
-    auto scheduler = uring.get_scheduler();
+    stdexec::scheduler auto scheduler = uring.get_scheduler();
 
     auto s1 =
         stdexec::schedule(scheduler)
@@ -50,7 +50,7 @@ int main() {
             std::cout << "s2:3s" << std::endl;
             print_global_clock();
         });
-    std::jthread j([&] {uring.run();});
-    auto a = stdexec::sync_wait(stdexec::when_all(std::move(s1), std::move(s2)));
-    (void)a;
+    std::jthread j([&] { uring.run(); });
+    stdexec::sync_wait(stdexec::when_all(std::move(s1), std::move(s2)));
+    uring.request_stop();
 }

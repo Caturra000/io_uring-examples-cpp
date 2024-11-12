@@ -10,9 +10,7 @@
 #include "detail.hpp"
 #include "io_uring_exec_run.h"
 
-using detail::immovable;
-
-struct io_uring_exec: public immovable,
+struct io_uring_exec: public detail::immovable,
                       private io_uring_exec_run<io_uring_exec>,
                       private detail::unified_stop_source<stdexec::inplace_stop_source>
 {
@@ -45,7 +43,7 @@ struct io_uring_exec: public immovable,
     // All the tasks are asynchronous.
     // The `task` struct is queued by a user-space intrusive queue.
     // NOTE: The io_uring-specified task is queued by an interal ring of io_uring.
-    struct task: immovable, intrusive_node {
+    struct task: detail::immovable, intrusive_node {
         using vtable = detail::make_vtable<
                         detail::add_complete_to_vtable<void(task*)>,
                         detail::add_cancel_to_vtable  <void(task*)>>;
@@ -56,55 +54,61 @@ struct io_uring_exec: public immovable,
     using intrusive_task_queue = detail::intrusive_queue<task, &task::_i_next>;
 
     // Required by stdexec.
-    template <stdexec::receiver Receiver>
-    struct operation: task {
-        using operation_state_concept = stdexec::operation_state_t;
+    struct scheduler {
+        template <stdexec::receiver Receiver>
+        struct operation: task {
+            using operation_state_concept = stdexec::operation_state_t;
 
-        void start() noexcept {
-            uring->_intrusive_queue.push(this);
-        }
+            void start() noexcept {
+                uring->_intrusive_queue.push(this);
+            }
 
-        inline constexpr static vtable this_vtable {
-            {.complete = [](task *_self) noexcept {
-                auto &receiver = static_cast<operation*>(_self)->receiver;
-                using env_type = stdexec::env_of_t<Receiver>;
-                using stop_token_type = stdexec::stop_token_of_t<env_type>;
-                if constexpr (stdexec::unstoppable_token<stop_token_type>) {
-                    stdexec::set_value(std::move(receiver));
-                    return;
-                }
-                auto stop_token = stdexec::get_stop_token(stdexec::get_env(receiver));
-                stop_token.stop_requested() ?
-                    stdexec::set_stopped(std::move(receiver))
-                    : stdexec::set_value(std::move(receiver));
-            }},
-            {.cancel = [](task *_self) noexcept {
-                auto self = static_cast<operation*>(_self);
-                stdexec::set_stopped(std::move(self->receiver));
-            }}
+            inline constexpr static vtable this_vtable {
+                {.complete = [](task *_self) noexcept {
+                    auto &receiver = static_cast<operation*>(_self)->receiver;
+                    using env_type = stdexec::env_of_t<Receiver>;
+                    using stop_token_type = stdexec::stop_token_of_t<env_type>;
+                    if constexpr (stdexec::unstoppable_token<stop_token_type>) {
+                        stdexec::set_value(std::move(receiver));
+                        return;
+                    }
+                    auto stop_token = stdexec::get_stop_token(stdexec::get_env(receiver));
+                    stop_token.stop_requested() ?
+                        stdexec::set_stopped(std::move(receiver))
+                        : stdexec::set_value(std::move(receiver));
+                }},
+                {.cancel = [](task *_self) noexcept {
+                    auto self = static_cast<operation*>(_self);
+                    stdexec::set_stopped(std::move(self->receiver));
+                }}
+            };
+
+            Receiver receiver;
+            io_uring_exec *uring;
         };
 
-        Receiver receiver;
-        io_uring_exec *uring;
-    };
+        struct sender {
+            using sender_concept = stdexec::sender_t;
+            using completion_signatures = stdexec::completion_signatures<
+                                            stdexec::set_value_t(),
+                                            stdexec::set_stopped_t()>;
+            struct env {
+                template <typename CPO>
+                auto query(stdexec::get_completion_scheduler_t<CPO>) const noexcept {
+                    return scheduler{uring};
+                }
+                io_uring_exec *uring;
+            };
 
-    // Required by stdexec.
-    struct sender {
-        using sender_concept = stdexec::sender_t;
-        using completion_signatures = stdexec::completion_signatures<
-                                        stdexec::set_value_t(),
-                                        stdexec::set_error_t(std::exception_ptr),
-                                        stdexec::set_stopped_t()>;
-        template <stdexec::receiver Receiver>
-        operation<Receiver> connect(Receiver receiver) noexcept {
-            return {{operation<Receiver>::this_vtable}, std::move(receiver), uring};
-        }
-        io_uring_exec *uring;
-    };
+            env get_env() const noexcept { return {uring}; }
 
-    // Required by stdexec.
-    struct scheduler {
-        auto operator<=>(const scheduler &) const=default;
+            template <stdexec::receiver Receiver>
+            operation<Receiver> connect(Receiver receiver) noexcept {
+                return {{operation<Receiver>::this_vtable}, std::move(receiver), uring};
+            }
+            io_uring_exec *uring;
+        };
+        bool operator<=>(const scheduler &) const=default;
         sender schedule() noexcept { return {uring}; }
         io_uring_exec *uring;
     };
@@ -112,7 +116,7 @@ struct io_uring_exec: public immovable,
     scheduler get_scheduler() noexcept { return {this}; }
 
     // External structured callbacks support.
-    struct io_uring_exec_operation_base: immovable {
+    struct io_uring_exec_operation_base: detail::immovable {
         using result_t = decltype(std::declval<io_uring_cqe>().res);
         using _self_t = io_uring_exec_operation_base;
         using vtable = detail::make_vtable<
@@ -156,9 +160,9 @@ struct io_uring_exec: public immovable,
 
     // See the comments on `coroutine.h` and `config.h`.
     // The `_inflight` value is estimated (or inaccurate).
-    std::atomic<ssize_t> /*_estimated*/_inflight {};
+    alignas(64) std::atomic<ssize_t> /*_estimated*/_inflight {};
     // A simple reference counter for run().
-    std::atomic<size_t> _running_run {};
+    alignas(64) std::atomic<size_t> _running_run {};
     intrusive_task_queue _intrusive_queue;
     detail::multi_lock<std::mutex> _submit_lock;
     io_uring _underlying_uring;

@@ -12,12 +12,13 @@ int main() {
     }
 
     io_uring_exec uring(512);
-    auto scheduler = uring.get_scheduler();
-    exec::async_scope scope;
+    stdexec::scheduler auto scheduler = uring.get_scheduler();
+    std::jthread j {[&](std::stop_token stop_token) { uring.run(stop_token); }};
+
     auto s1 =
         stdexec::schedule(scheduler)
       | stdexec::then([] {
-            std::cout << "hello ";
+            std::cout << "hello!" << std::endl;
             return 19260816;
         })
       | stdexec::then([](int v) {
@@ -44,8 +45,7 @@ int main() {
                 });
         });
 
-    std::jthread j {[&] { uring.run(); }};
-
+    // exec::async_scope scope;
     // scope.spawn(std::move(s1) | stdexec::then([](...) {}));
     // scope.spawn(std::move(s2) | stdexec::then([](...) {}));
     // stdexec::sync_wait(scope.on_empty());

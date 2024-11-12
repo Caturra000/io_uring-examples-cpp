@@ -7,7 +7,7 @@
 
 int main() {
     io_uring_exec uring({.uring_entries=512});
-    auto scheduler = uring.get_scheduler();
+    stdexec::scheduler auto scheduler = uring.get_scheduler();
     exec::async_scope scope;
 
     constexpr size_t pool_size = 4;

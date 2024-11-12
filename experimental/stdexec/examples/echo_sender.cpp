@@ -52,7 +52,7 @@ int main() {
     io_uring_exec uring({.uring_entries=512});
     exec::async_scope scope;
 
-    auto scheduler = uring.get_scheduler();
+    stdexec::scheduler auto scheduler = uring.get_scheduler();
 
     scope.spawn(
         stdexec::schedule(scheduler)

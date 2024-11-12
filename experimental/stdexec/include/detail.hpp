@@ -74,7 +74,7 @@ struct intrusive_queue<T, Next> {
     }
 
 private:
-    std::atomic<Node*> _head {nullptr};
+    alignas(64) std::atomic<Node*> _head {nullptr};
 };
 
 struct you_are_a_vtable_signature {};
