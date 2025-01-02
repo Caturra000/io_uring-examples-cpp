@@ -1,0 +1,67 @@
+!!!WORK IN PROGRESS!!!
+!!!WORK IN PROGRESS!!!
+!!!WORK IN PROGRESS!!!
+
+GCC works. <del> But Clang has some problems. ¯\_(ツ)_/¯ </del>
+Clang works!
+
+========== ping-pong ==========
+
+`ping` is a client.
+`pong` is a server.
+
+Usage:
+pong <port> <threads> <blocksize> <sessions>
+ping <port> <threads> <blocksize> <sessions> <timeout(s)>
+
+Example:
+./build/pong 8848 5 16384 50
+./build/ping 8848 5 16384 50 10
+
+One-click script:
+* xmake: `xmake build benchmarks && xmake run benchmarks`.
+* make: `make benchmark_script`.
+It is recommended to use **xmake** to run benchmarks.
+All commands should be run from the root directory.
+
+Note:
+* `pong_asio` is also a server, but it uses Asio. You can use it to compare performance.
+  For a fair comparison, make sure to enable the `-DASIO_HAS_IO_URING` and `-DASIO_DISABLE_EPOLL` macros.
+  (`epoll` is toooo fast! For the current kernel implementation, `io_uring` can't beat it.)
+  Use `xmake run benchmarks --server asio` to benchmark.
+* `ping_when_any` is also a client, but it uses `exec::when_any`. You can use it to compare polling performance.
+  Although `uring_exec` supports per-I/O-operation cancellation, it may reduce performance.
+  Use `xmake run benchmarks --client when_any` to benchmark.
+
+Here is my benchmark report on:
+* {Linux v6.4.8}
+* {AMD 5800H, 16 GB}
+* {uring_exec 6d77952, asio 62481a2}
+* {gcc v13.2.0 -O3}
+
+blocksize       = 16384
+timeout         = 10s
+throughput unit = GiB/s
+
+| threads / sessions | asio (io_uring) | uring_exec | asio (epoll) |
+| ------------------ | --------------- | ---------- | ------------ |
+| 1 / 10             | 3.517           | 3.717      | 3.098        |
+| 1 / 100            | 3.600           | 4.026      | 3.052        |
+| 1 / 1000           | 1.462           | 1.620      | 1.320        |
+| 1 / 10000          | 1.432           | 1.829      | 1.321        |
+| 1 / 100000         | 0.349           | 0.397      | 0.327        |
+| 2 / 10             | 1.639           | 3.376      | 4.610        |
+| 2 / 100            | 2.724           | 3.489      | 5.013        |
+| 2 / 1000           | 1.329           | 1.889      | 1.772        |
+| 2 / 10000          | 1.334           | 1.770      | 1.833        |
+| 2 / 100000         | 0.559           | 1.675      | 0.545        |
+| 4 / 10             | 1.708           | 3.106      | 6.279        |
+| 4 / 100            | 2.538           | 3.226      | 8.744        |
+| 4 / 1000           | 1.312           | 4.796      | 2.144        |
+| 4 / 10000          | 1.317           | 1.978      | 2.150        |
+| 4 / 100000         | 1.171           | 3.598      | 2.011        |
+| 8 / 10             | 0.936           | 2.430      | 2.370        |
+| 8 / 100            | 2.031           | 2.518      | 7.979        |
+| 8 / 1000           | 1.120           | 4.962      | 2.005        |
+| 8 / 10000          | 1.093           | 6.662      | 2.118        |
+| 8 / 100000         | 1.075           | 5.971      | 1.900        |
